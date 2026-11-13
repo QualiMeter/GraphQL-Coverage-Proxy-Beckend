@@ -16,6 +16,7 @@ from app.models import (
     GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
 )
+from app.schema_collector import collect_schema
 from app.schema_parser import parse_sdl
 
 
@@ -112,6 +113,35 @@ async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> 
     except IntegrityError as exc:
         await session.rollback()
         raise ConflictError("Concurrent schema import conflicted; retry the request") from exc
+    await session.refresh(snapshot)
+    return schema_out(snapshot)
+
+
+async def import_introspection_schema(
+    session: AsyncSession, service_id: uuid.UUID, target_url: str
+) -> SchemaOut:
+    """Fetch an upstream schema and persist its normalized SDL and raw JSON.
+
+    ``target_url`` must come from application configuration, never from an API
+    request body. The HTTP route and configuration are owned by backend #1.
+    """
+    if await session.get(GraphQLService, service_id) is None:
+        raise NotFoundError("GraphQL service not found")
+    # Release the read-only lookup transaction while waiting on the upstream API.
+    await session.rollback()
+
+    collected = await collect_schema(target_url)
+    result = await import_sdl(session, service_id, collected.parsed.canonical_sdl)
+    snapshot = await session.get(SchemaSnapshot, result.id)
+    if snapshot is None:
+        raise NotFoundError("Schema snapshot not found after introspection import")
+
+    # The uniqueness rule is per service and normalized schema hash, so an
+    # introspection of a schema already imported from SDL enriches that same
+    # snapshot instead of creating a duplicate.
+    snapshot.source = "introspection"
+    snapshot.introspection_json = collected.introspection_json
+    await session.commit()
     await session.refresh(snapshot)
     return schema_out(snapshot)
 
