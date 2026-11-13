@@ -11,8 +11,9 @@
 - Сохранение наблюдения через Python-функцию \`app.services.record_observation()\`.
 - Подсчёт уникального покрытия полей и числа запросов, затронувших каждое поле.
 - REST API и автоматическая документация Swagger/OpenAPI.
+- `POST /graphql` — HTTP-прокси на адрес из `TARGET_GRAPHQL_URL`.
 
-**Пока не реализовано:** сам \`/graphql\` HTTP Proxy, интроспекция удалённого GraphQL API,
+**Пока не реализовано:** запись покрытия через прокси, интроспекция удалённого GraphQL API,
 AST-анализ запросов, привязка к конкретному E2E-тест-кейсу, авторизация администраторов.
 Эти компоненты принадлежат отдельным задачам команды. Не выставляйте этот прототип
 как общедоступный сервис без ограничения доступа.
@@ -61,6 +62,33 @@ alembic upgrade head
 uvicorn app.main:app --reload
 \`\`\`
 
+## HTTP-прокси GraphQL
+
+Задайте `TARGET_GRAPHQL_URL` в окружении процесса API или в `.env` для Compose
+(Compose передаёт эту переменную контейнеру):
+
+```bash
+export TARGET_GRAPHQL_URL=https://your-api.example/graphql
+curl http://localhost:8000/graphql \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"query":"query Health { health }","variables":{},"operationName":"Health"}'
+```
+
+Прокси передаёт исходные байты тела, `Authorization`, `Cookie` и применимые заголовки.
+Hop-by-hop заголовки, указанные в `Connection` заголовки и `X-Coverage-Run-Id`
+исключаются; `Host` и `Content-Length` формируются заново. Статус и тело upstream,
+включая 4xx/5xx, сжатие и отдельные `Set-Cookie`, сохраняются. Редиректы не выполняются.
+Адрес upstream задаётся только окружением, HTTP-запрос не может его переопределить.
+
+При отсутствии или некорректном `TARGET_GRAPHQL_URL` только `/graphql` возвращает
+503; остальные REST API доступны. Сетевые ошибки дают 502, таймаут — 504 без
+внутренних подробностей. Таймаут каждой сетевой операции — 30 секунд.
+Тела запросов, переменные и секреты не сохраняются. Проверка runId, AST-анализ,
+introspection и запись покрытия в этот этап не входят.
+
+Ограничения этапа: только HTTP POST; тела запросов и ответов буферизуются в памяти,
+потоковая доставка и WebSocket-подписки не поддержаны.
+
 ## Обращение фронтенда
 
 Подробный контракт: [docs/frontend-api.md](docs/frontend-api.md).
@@ -98,7 +126,7 @@ pytest -q -m integration
 
 - Общие типы: \`app/contracts.py\`.
 - GraphQL Analyzer должен выдавать \`AnalysisResult\` со списком \`FieldReference\`.
-- Proxy должен вызывать \`record_observation(session, RequestObservationInput(...))\`
+- На следующем этапе Proxy должен вызывать \`record_observation(session, RequestObservationInput(...))\`
   после получения ответа upstream.
 - Хеш запроса — SHA-256 текста GraphQL; не хранить переменные, авторизацию и cookies.
 - \`response_has_data=True\` означает, что в GraphQL-ответе есть ключ \`data\`;

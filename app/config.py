@@ -11,3 +11,7 @@ def database_url() -> str:
 def cors_origins() -> list[str]:
     value = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
     return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+
+def target_graphql_url() -> str:
+    return os.environ.get("TARGET_GRAPHQL_URL", "").strip()

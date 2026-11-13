@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import router
 from app.config import cors_origins
 from app.database import engine
+from app.proxy import router as proxy_router
 
 
 @asynccontextmanager
@@ -17,6 +18,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="GraphQL Coverage API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins(), allow_methods=["*"], allow_headers=["*"])
 app.include_router(router)
+app.include_router(proxy_router)
 
 
 @app.get("/health", tags=["System"])

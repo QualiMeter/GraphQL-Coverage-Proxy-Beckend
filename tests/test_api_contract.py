@@ -29,7 +29,7 @@ def test_frontend_routes_are_documented_by_fastapi():
         assert "/api/schemas/{schema_id}/graph" in paths
         assert "/api/runs/{run_id}/coverage" in paths
         assert "/api/runs/{run_id}/requests" in paths
-        assert "/graphql" not in paths  # Proxy is a separate, unfinished feature.
+        assert "post" in paths["/graphql"]
 
 
 def test_health_is_not_mistaken_for_database_health():
