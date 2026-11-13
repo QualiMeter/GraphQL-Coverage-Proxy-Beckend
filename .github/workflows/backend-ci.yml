@@ -1,0 +1,68 @@
+name: Backend CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: coverage_test
+          POSTGRES_USER: coverage_test
+          POSTGRES_PASSWORD: coverage_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U coverage_test -d coverage_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://coverage_test:coverage_test_password@127.0.0.1:5432/coverage_test
+      TEST_DATABASE_URL: postgresql+asyncpg://coverage_test:coverage_test_password@127.0.0.1:5432/coverage_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e '.[test]'
+
+      - name: Check dependency compatibility
+        run: python -m pip check
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+
+      - name: Verify test database configuration and apply migrations
+        run: |
+          : "${TEST_DATABASE_URL:?TEST_DATABASE_URL must point to the job PostgreSQL service}"
+          test "$DATABASE_URL" = "$TEST_DATABASE_URL"
+          alembic upgrade head
+
+      - name: Run unit tests
+        run: python -m pytest -m "not integration" -v
+
+      - name: Run PostgreSQL integration tests
+        run: |
+          : "${TEST_DATABASE_URL:?PostgreSQL integration tests must not be skipped}"
+          python -m pytest -m integration -v -rs
