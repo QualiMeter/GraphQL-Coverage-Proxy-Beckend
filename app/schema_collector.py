@@ -1,7 +1,9 @@
 """Fetch and validate a GraphQL schema through the standard introspection API."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from graphql import (
     GraphQLError,
@@ -13,6 +15,9 @@ from graphql import (
 from graphql.type.schema import GraphQLSchema
 
 from app.schema_parser import ParsedSchema, parse_sdl
+
+if TYPE_CHECKING:
+    import httpx
 
 
 class SchemaCollectionError(Exception):
@@ -36,7 +41,12 @@ class CollectedSchema:
     introspection_json: dict[str, Any]
 
 
-async def collect_schema(target_url: str, *, timeout: float = 15.0) -> CollectedSchema:
+async def collect_schema(
+    target_url: str,
+    *,
+    timeout: float = 15.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> CollectedSchema:
     """Fetch introspection from a trusted, application-configured endpoint.
 
     Callers must not pass a URL taken from an untrusted request body. Keeping
@@ -46,7 +56,7 @@ async def collect_schema(target_url: str, *, timeout: float = 15.0) -> Collected
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
             response = await client.post(
                 target_url,
                 json={"query": get_introspection_query()},
