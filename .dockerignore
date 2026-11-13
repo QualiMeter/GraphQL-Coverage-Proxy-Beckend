@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+deploy/.env
 .venv/
 .git/
 .pytest_cache/
