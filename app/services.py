@@ -286,8 +286,9 @@ async def get_graph(
                     from_type=type_row.name, field=field.name,
                     to_type=target.name, covered=covered,
                 ))
-        total_fields += len(raw_fields)
-        covered_fields += type_covered
+        if type_row.kind == "OBJECT":
+            total_fields += len(raw_fields)
+            covered_fields += type_covered
         graph_types.append(GraphType(
             name=type_row.name, kind=type_row.kind,
             total_fields=len(raw_fields), covered_fields=type_covered,
