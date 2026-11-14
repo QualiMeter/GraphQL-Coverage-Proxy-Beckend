@@ -11,6 +11,7 @@ from starlette.datastructures import State
 from sqlalchemy import select, update
 
 from app import proxy
+from app.analyzer_adapter import analyze_e2e_query
 from app.contracts import AnalysisResult, FieldReference
 from app.database import Base, get_session
 from app.main import app
@@ -52,6 +53,60 @@ async def make_run(session):
     run = await create_run(session, snapshot.id, "E2E run", {})
     other_run = await create_run(session, other.id, "Other snapshot run", {})
     return run, snapshot, other_run
+
+
+async def test_real_ast_analyzer_http_to_postgres_to_coverage(
+    postgres_session, http_client, upstream, monkeypatch,
+):
+    run, snapshot, other_run = await make_run(postgres_session)
+    monkeypatch.setattr(app, "state", State({"coverage_analyzer": analyze_e2e_query}))
+    upstream(lambda request: raw_response(200, b'{"data":{"user":{"id":"u1"}}}'))
+
+    query = "query Fetch($withName: Boolean!) { user { id name @include(if: $withName) } }"
+    response = await http_client.post(
+        "/graphql",
+        json={"query": query, "operationName": "Fetch", "variables": {"withName": False}},
+        headers={"X-Coverage-Run-Id": str(run.id)},
+    )
+    assert response.status_code == 200
+
+    observed = (await postgres_session.scalars(
+        select(ObservedRequest).where(ObservedRequest.run_id == run.id)
+    )).one()
+    assert observed.analysis_status == "success"
+    assert observed.operation_name == "Fetch"
+    assert observed.response_has_data is True
+    assert observed.query_hash == hashlib.sha256(query.encode()).hexdigest()
+
+    graph = (await http_client.get(f"/api/runs/{run.id}/coverage")).json()
+    assert graph["schemaId"] == str(snapshot.id)
+    assert graph["summary"] == {"totalFields": 3, "coveredFields": 2, "coveragePercent": 66.67}
+    fields = {(t["name"], f["name"]): f["covered"] for t in graph["types"] for f in t["fields"]}
+    assert fields == {("Query", "user"): True, ("User", "id"): True, ("User", "name"): False}
+    other_graph = (await http_client.get(f"/api/runs/{other_run.id}/coverage")).json()
+    assert other_graph["summary"]["coveredFields"] == 0
+
+
+async def test_real_analyzer_with_null_data_keeps_coverage_zero(
+    postgres_session, http_client, upstream, monkeypatch,
+):
+    run, _, _ = await make_run(postgres_session)
+    monkeypatch.setattr(app, "state", State({"coverage_analyzer": analyze_e2e_query}))
+    upstream(lambda request: raw_response(
+        200, b'{"data":null,"errors":[{"message":"Resolver failed"}]}',
+    ))
+    response = await http_client.post(
+        "/graphql", json={"query": "{ user { id } }"},
+        headers={"X-Coverage-Run-Id": str(run.id)},
+    )
+    assert response.status_code == 200
+    observed = (await postgres_session.scalars(
+        select(ObservedRequest).where(ObservedRequest.run_id == run.id)
+    )).one()
+    assert observed.analysis_status == "success"
+    assert observed.response_has_data is False
+    assert observed.graphql_has_errors is True
+    assert (await http_client.get(f"/api/runs/{run.id}/coverage")).json()["summary"]["coveredFields"] == 0
 
 
 async def test_http_exchange_committed_before_response_and_correct_snapshot(

@@ -79,7 +79,6 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
         if operation is None:
             return AnalysisResult(
                 status="validation_error",
-                operation_name=request.operation_name,
                 error_code="OPERATION_NOT_FOUND",
             )
 

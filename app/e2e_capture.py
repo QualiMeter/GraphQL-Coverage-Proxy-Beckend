@@ -62,7 +62,10 @@ def graphql_response_flags(decoded_body: bytes | None) -> tuple[bool | None, boo
         return None, None
     if not isinstance(payload, dict):
         return None, None
-    return "data" in payload, bool(payload.get("errors"))
+    # `data: null` is not evidence that any selected field produced usable data.
+    # A partial object with errors may still count selected (not necessarily
+    # successfully resolved) fields; the dashboard describes that limitation.
+    return isinstance(payload.get("data"), dict), bool(payload.get("errors"))
 
 
 async def load_run_snapshot(session: AsyncSession, run_id: uuid.UUID) -> SchemaSnapshot:
