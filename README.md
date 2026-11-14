@@ -6,6 +6,13 @@
 **Production:** [Swagger](https://graphql.rebyte.fun/docs) ·
 [OpenAPI](https://graphql.rebyte.fun/openapi.json) ·
 публичный API: `https://graphql.rebyte.fun/api/...`.
+
+**Frontend:** [работающий интерфейс](https://graphql.rebyte.fun/coverage/) ·
+[репозиторий React/Vite](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-Frontend).
+Статическая сборка публикуется на VPS отдельным GitHub Actions workflow при
+успешном CI на `main`; Nginx отдаёт её с того же HTTPS origin, что и API.
+Пока UI использует mock/localStorage, интеграция с реальным API — задача фронтендера.
+
 Регистрация для просмотра опубликованных сервисов не нужна. Все изменяющие
 операции и GraphQL-прокси защищены серверным API-ключом.
 
@@ -73,8 +80,11 @@ curl http://localhost:8000/health
   не в React/Vite-приложении.
 
 Публичный REST API доступен на `https://graphql.rebyte.fun` без префикса
-`/coverage`. Для разработчиков интерфейса актуальный контракт, примеры ответов
-и настройки CORS описаны в [docs/frontend-api.md](docs/frontend-api.md).
+`/coverage`. В production фронтенд обращается к API относительными путями
+(`fetch('/api/services')`): CORS между ними не нужен, поскольку origin общий.
+Локально Vite проксирует `/api` на сервер API.
+Контракт, примеры ответов и ограничения для frontend:
+[docs/frontend-api.md](docs/frontend-api.md).
 
 ## Запуск без Docker для API (PostgreSQL нужен отдельно)
 
@@ -191,6 +201,24 @@ Collector пока не передаёт пользовательские Bearer
 5. Позже прокси записывает наблюдения через `record_observation()`.
 6. `GET /api/runs/{runId}/coverage` — получаем реальные поля, связи и покрытие.
 7. `POST /api/runs/{runId}/finish` — закрываем прогон.
+
+## План: расширение аналитического API
+
+По предложенному ТЗ капитана эти endpoints **ещё не реализованы**;
+фронтендеру нельзя рассчитывать на их наличие до отдельного PR и тестов:
+
+- **P0:** `GET /api/runs/{runId}/operations` — группировка по
+  `query_hash`, имени и типу операции, частота, ошибки, время и учтённые поля.
+- **P0:** `GET /api/runs/{runId}/stats` — общие показатели прогона,
+  покрытие по существующему Coverage Engine и временная статистика обращений.
+- **P1:** фильтрация защищённого журнала `/requests`, подробности отдельного
+  обращения и сравнение исторических прогонов.
+
+Для опубликованных сервисов планируется публичная агрегированная аналитика;
+для приватных остаётся проверка доступа. Детальный журнал и изменяющие методы
+по-прежнему требуют серверной авторизации. Пользовательские аккаунты и
+регистрация не входят в этот этап. Не открывайте master
+`X-Coverage-Api-Key` в браузере.
 
 ## Тесты
 
