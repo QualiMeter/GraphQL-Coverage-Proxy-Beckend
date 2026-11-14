@@ -33,7 +33,10 @@ class InvalidReferenceError(Exception):
 
 
 def service_out(row: GraphQLService) -> ServiceOut:
-    return ServiceOut(id=row.id, key=row.key, name=row.name, created_at=row.created_at)
+    return ServiceOut(
+        id=row.id, key=row.key, name=row.name,
+        is_public=row.is_public, created_at=row.created_at,
+    )
 
 
 def schema_out(row: SchemaSnapshot) -> SchemaOut:
@@ -43,19 +46,22 @@ def schema_out(row: SchemaSnapshot) -> SchemaOut:
     )
 
 
-def run_out(row: TestRun) -> RunOut:
+def run_out(row: TestRun, *, include_metadata: bool = True) -> RunOut:
     return RunOut(
         id=row.id, snapshot_id=row.snapshot_id, name=row.name, status=row.status,
         started_at=row.started_at, finished_at=row.finished_at,
-        metadata=row.metadata_json,
+        # Untrusted CI metadata may contain internal details and is never public.
+        metadata=row.metadata_json if include_metadata else {},
     )
 
 
-async def create_service(session: AsyncSession, key: str, name: str) -> ServiceOut:
+async def create_service(
+    session: AsyncSession, key: str, name: str, is_public: bool = False
+) -> ServiceOut:
     existing = await session.scalar(select(GraphQLService.id).where(GraphQLService.key == key))
     if existing is not None:
         raise ConflictError("A service with that key already exists")
-    row = GraphQLService(key=key, name=name)
+    row = GraphQLService(key=key, name=name, is_public=is_public)
     session.add(row)
     try:
         await session.commit()
@@ -66,9 +72,61 @@ async def create_service(session: AsyncSession, key: str, name: str) -> ServiceO
     return service_out(row)
 
 
-async def list_services(session: AsyncSession) -> list[ServiceOut]:
-    rows = (await session.scalars(select(GraphQLService).order_by(GraphQLService.name))).all()
+async def list_services(session: AsyncSession, *, public_only: bool = False) -> list[ServiceOut]:
+    stmt = select(GraphQLService).order_by(GraphQLService.name)
+    if public_only:
+        stmt = stmt.where(GraphQLService.is_public.is_(True))
+    rows = (await session.scalars(stmt)).all()
     return [service_out(row) for row in rows]
+
+
+async def change_service_visibility(
+    session: AsyncSession, service_id: uuid.UUID, is_public: bool
+) -> ServiceOut:
+    row = await session.scalar(
+        select(GraphQLService).where(GraphQLService.id == service_id).with_for_update()
+    )
+    if row is None:
+        raise NotFoundError("GraphQL service not found")
+    row.is_public = is_public
+    await session.commit()
+    await session.refresh(row)
+    return service_out(row)
+
+
+async def ensure_visible_service(
+    session: AsyncSession, service_id: uuid.UUID, *, admin: bool
+) -> None:
+    stmt = select(GraphQLService.id).where(GraphQLService.id == service_id)
+    if not admin:
+        stmt = stmt.where(GraphQLService.is_public.is_(True))
+    if await session.scalar(stmt) is None:
+        # Do not reveal the existence of private resources to anonymous callers.
+        raise NotFoundError("GraphQL service not found")
+
+
+async def ensure_visible_snapshot(
+    session: AsyncSession, snapshot_id: uuid.UUID, *, admin: bool
+) -> None:
+    service_id = await session.scalar(
+        select(SchemaSnapshot.service_id).where(SchemaSnapshot.id == snapshot_id)
+    )
+    if service_id is None:
+        raise NotFoundError("Schema snapshot not found")
+    await ensure_visible_service(session, service_id, admin=admin)
+
+
+async def ensure_visible_run(
+    session: AsyncSession, run_id: uuid.UUID, *, admin: bool
+) -> None:
+    service_id = await session.scalar(
+        select(SchemaSnapshot.service_id)
+        .join(TestRun, TestRun.snapshot_id == SchemaSnapshot.id)
+        .where(TestRun.id == run_id)
+    )
+    if service_id is None:
+        raise NotFoundError("Test run not found")
+    await ensure_visible_service(session, service_id, admin=admin)
 
 
 async def _save_parsed_schema(
@@ -192,12 +250,14 @@ async def create_run(
     return run_out(row)
 
 
-async def list_runs(session: AsyncSession, snapshot_id: uuid.UUID) -> list[RunOut]:
+async def list_runs(
+    session: AsyncSession, snapshot_id: uuid.UUID, *, include_metadata: bool = True
+) -> list[RunOut]:
     rows = (await session.scalars(
         select(TestRun).where(TestRun.snapshot_id == snapshot_id)
         .order_by(TestRun.started_at.desc())
     )).all()
-    return [run_out(row) for row in rows]
+    return [run_out(row, include_metadata=include_metadata) for row in rows]
 
 
 async def finish_run(session: AsyncSession, run_id: uuid.UUID) -> RunOut:

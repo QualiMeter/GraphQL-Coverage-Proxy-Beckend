@@ -18,13 +18,14 @@ from app.main import app
 from app.models import ObservedRequest, RequestFieldUsage, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
 from app.services import create_run, create_service, finish_run, import_sdl
 from test_e2e_capture_postgres import postgres_session  # noqa: F401
-from test_graphql_proxy import raw_response, upstream  # noqa: F401
+from test_graphql_proxy import TEST_ADMIN_KEY, raw_response, upstream  # noqa: F401
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 async def http_client(postgres_session, monkeypatch):
+    monkeypatch.setenv("COVERAGE_API_KEY", TEST_ADMIN_KEY)
     async def dependency():
         yield postgres_session
 
@@ -34,6 +35,7 @@ async def http_client(postgres_session, monkeypatch):
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://proxy.example",
+            headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY},
         ) as client:
             yield client
     finally:
