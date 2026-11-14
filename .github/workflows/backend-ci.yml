@@ -30,7 +30,7 @@ jobs:
           --health-retries 10
 
     env:
-      DATABASE_URL: postgresql+asyncpg://coverage_test:coverage_test_password@127.0.0.1:5432/coverage_test
+      DATABASE_URL: postgresql+asyncpg://coverage_test:coverage_test_password@127.0.0.1:5432/coverage
       TEST_DATABASE_URL: postgresql+asyncpg://coverage_test:coverage_test_password@127.0.0.1:5432/coverage_test
 
     steps:
@@ -53,11 +53,17 @@ jobs:
       - name: Validate Docker Compose configuration
         run: docker compose config --quiet
 
-      - name: Verify test database configuration and apply migrations
+      - name: Create isolated application database
+        run: >-
+          psql "postgresql://coverage_test:coverage_test_password@127.0.0.1:5432/coverage_test"
+          -v ON_ERROR_STOP=1 -c "CREATE DATABASE coverage"
+
+      - name: Verify database configuration and apply migrations
         run: |
           : "${TEST_DATABASE_URL:?TEST_DATABASE_URL must point to the job PostgreSQL service}"
-          test "$DATABASE_URL" = "$TEST_DATABASE_URL"
+          test "$DATABASE_URL" != "$TEST_DATABASE_URL"
           alembic upgrade head
+          DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
 
       - name: Run unit tests
         run: python -m pytest -m "not integration" -v

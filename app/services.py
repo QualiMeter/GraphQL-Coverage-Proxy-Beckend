@@ -16,7 +16,8 @@ from app.models import (
     GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
 )
-from app.schema_parser import parse_sdl
+from app.schema_collector import collect_schema
+from app.schema_parser import ParsedSchema, parse_sdl
 
 
 class NotFoundError(Exception):
@@ -70,10 +71,14 @@ async def list_services(session: AsyncSession) -> list[ServiceOut]:
     return [service_out(row) for row in rows]
 
 
-async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> SchemaOut:
-    if await session.get(GraphQLService, service_id) is None:
-        raise NotFoundError("GraphQL service not found")
-    parsed = parse_sdl(sdl)
+async def _save_parsed_schema(
+    session: AsyncSession,
+    service_id: uuid.UUID,
+    parsed: ParsedSchema,
+    *,
+    source: str,
+    introspection_json: dict | None = None,
+) -> SchemaOut:
     existing = await session.scalar(
         select(SchemaSnapshot).where(
             SchemaSnapshot.service_id == service_id,
@@ -81,11 +86,18 @@ async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> 
         )
     )
     if existing is not None:
+        if source == "introspection":
+            existing.schema_sdl = parsed.canonical_sdl
+            existing.source = source
+            existing.introspection_json = introspection_json
+            await session.commit()
+            await session.refresh(existing)
         return schema_out(existing)
 
     snapshot = SchemaSnapshot(
         service_id=service_id, schema_hash=parsed.sha256,
-        schema_sdl=parsed.canonical_sdl, source="sdl",
+        schema_sdl=parsed.canonical_sdl, source=source,
+        introspection_json=introspection_json,
     )
     session.add(snapshot)
     await session.flush()
@@ -114,6 +126,40 @@ async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> 
         raise ConflictError("Concurrent schema import conflicted; retry the request") from exc
     await session.refresh(snapshot)
     return schema_out(snapshot)
+
+
+async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> SchemaOut:
+    if await session.get(GraphQLService, service_id) is None:
+        raise NotFoundError("GraphQL service not found")
+    return await _save_parsed_schema(
+        session, service_id, parse_sdl(sdl), source="sdl"
+    )
+
+
+async def import_introspection_schema(
+    session: AsyncSession, service_id: uuid.UUID, target_url: str
+) -> SchemaOut:
+    """Fetch an upstream schema and persist its normalized SDL and raw JSON.
+
+    ``target_url`` must come from application configuration, never from an API
+    request body. The HTTP route and configuration are owned by backend #1.
+    """
+    # Fetch first, before opening a database transaction. Never roll back the
+    # caller's session: it may contain unrelated uncommitted changes.
+    collected = await collect_schema(target_url)
+    if await session.get(GraphQLService, service_id) is None:
+        raise NotFoundError("GraphQL service not found")
+    # The uniqueness rule is per service and normalized schema hash, so an
+    # introspection of a schema already imported from SDL enriches that same
+    # snapshot instead of creating a duplicate. The schema and provenance are
+    # committed atomically.
+    return await _save_parsed_schema(
+        session,
+        service_id,
+        collected.parsed,
+        source="introspection",
+        introspection_json=collected.introspection_json,
+    )
 
 
 async def list_schemas(session: AsyncSession, service_id: uuid.UUID) -> list[SchemaOut]:
