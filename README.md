@@ -62,6 +62,27 @@ alembic upgrade head
 uvicorn app.main:app --reload
 \`\`\`
 
+## Подготовка интеграции E2E-наблюдений
+
+Внутренний модуль `app.e2e_capture` связывает один GraphQL HTTP-обмен
+с существующим `running`-прогоном и его snapshot схемы:
+`capture_e2e_exchange(session, run_id=..., request_body=...,
+decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
+
+- `analyzer` обязателен: это асинхронная функция, принимающая
+  `(GraphQLQueryInput, schema_sdl)` и возвращающая настоящий `AnalysisResult`.
+- Поддерживается одиночный JSON GraphQL-запрос, включая `operationName` и
+  `variables`. Неподдерживаемая форма сохраняется как `unsupported` без покрытия.
+- В PostgreSQL сохраняются только метаданные, хеш текста операции, статусы
+  анализа и ссылки на поля из схемы. Ни query, ни variables, ни ответы не сохраняются.
+- Признаки GraphQL-ответа вычисляются по **декодированному JSON**. Для
+  сжатого/непроверяемого ответа вызывающий код передаёт `None`.
+- При падении анализатора записывается `internal_error`, без фиктивного покрытия.
+
+**Пока этот модуль не вызывается маршрутом `/graphql`**: настоящего AST Analyzer
+в сборке нет. Это точка подключения для следующего PR после его готовности.
+Текущий прокси остаётся прозрачным и не обещает запись покрытия.
+
 ## HTTP-прокси GraphQL
 
 Задайте `TARGET_GRAPHQL_URL` в окружении процесса API или в `.env` для Compose
