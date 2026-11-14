@@ -26,6 +26,7 @@ def test_frontend_routes_are_documented_by_fastapi():
         paths = response.json()["paths"]
         assert "/api/services" in paths
         assert "/api/schemas/import" in paths
+        assert "/api/schemas/import/introspection" in paths
         assert "/api/schemas/{schema_id}/graph" in paths
         assert "/api/runs/{run_id}/coverage" in paths
         assert "/api/runs/{run_id}/requests" in paths
