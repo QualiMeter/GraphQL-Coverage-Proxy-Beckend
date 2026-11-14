@@ -79,7 +79,7 @@ async def test_empty_run_and_unknown_duration(postgres_session, analytics_run, n
     operation, = await list_operations(session, run.id)
     assert operation.avg_duration_ms is None
     assert operation.operation_name == name
-    assert operation.request_count == operation.fields[0].request_count == 2
+    assert operation.request_count == operation.fields[0].hits == 2
     assert stats.coverage_percent == (await get_run_graph(session, run.id)).summary.coverage_percent
 
 
@@ -114,8 +114,8 @@ async def test_aggregates_group_identity_errors_fields_timeline_and_history(post
     assert (a.request_count, a.counted_request_count, a.http_error_count, a.graphql_error_count) == (4, 2, 2, 2)
     assert a.avg_duration_ms == 20.0
     assert a.last_seen_at == datetime(2026, 11, 14, 0, 2, tzinfo=timezone.utc)
-    assert [(f.type_name, f.field_name, f.request_count) for f in a.fields] == [
-        ("Query", "users", 3), ("User", "id", 3), ("User", "name", 3),
+    assert [(f.type_name, f.field_name, f.hits) for f in a.fields] == [
+        ("Query", "users", 2), ("User", "id", 2), ("User", "name", 2),
     ]
     assert len(await list_operations(session, run.id, operation_name="GetUsers")) == 3
     assert len(await list_operations(session, run.id, operation_type="mutation")) == 1
@@ -188,7 +188,7 @@ async def test_analytics_visibility_http_filters_and_existing_protection(postgre
                 assert (await client.get(f"/api/runs/{run.id}/{endpoint}")).status_code == 200
             operations = (await client.get(f"/api/runs/{run.id}/operations")).json()
             assert operations[0]["operationName"] is None
-            assert operations[0]["fields"] == [{"typeName": "Query", "fieldName": "health", "requestCount": 1}]
+            assert operations[0]["fields"] == [{"typeName": "Query", "fieldName": "health", "hits": 1}]
             filtered = await client.get(f"/api/runs/{run.id}/operations?operationType=mutation")
             assert filtered.status_code == 200 and filtered.json() == []
             assert (await client.get(f"/api/runs/{run.id}/operations?operationType=bogus")).status_code == 422
@@ -233,7 +233,7 @@ async def test_real_analyzer_never_invents_fields_for_parse_errors_or_subscripti
     assert query.operation_key == operation_key(
         hashlib.sha256(b"query { users { id id } }").hexdigest(), None, "query"
     )
-    assert [(f.type_name, f.field_name, f.request_count) for f in query.fields] == [
+    assert [(f.type_name, f.field_name, f.hits) for f in query.fields] == [
         ("Query", "users", 1), ("User", "id", 1),
     ]
     subscription = next(item for item in operations if item.operation_type == "subscription")
@@ -243,3 +243,30 @@ async def test_real_analyzer_never_invents_fields_for_parse_errors_or_subscripti
     assert stats.subscription_requests == 1
     assert stats.http_error_count == stats.graphql_error_count == 4
     assert stats.covered_fields == 2
+
+
+@pytest.mark.parametrize("uncounted_data", [False, None])
+async def test_operation_field_hits_match_coverage_engine(postgres_session, analytics_run, uncounted_data):
+    _, _, run = analytics_run
+    session = postgres_session
+    fields = (("Query", "users"), ("User", "id"), ("User", "id"))
+    await observe(session, run.id, fields=fields)
+    # Errors do not disqualify an otherwise counted request.
+    await observe(session, run.id, fields=fields, http=500, errors=True)
+    await observe(session, run.id, fields=fields + (("User", "name"),), data=uncounted_data)
+    operation, = await list_operations(session, run.id)
+    assert operation.request_count == 3
+    assert operation.counted_request_count == 2
+    assert [(field.type_name, field.field_name, field.hits) for field in operation.fields] == [
+        ("Query", "users", 2), ("User", "id", 2),
+    ]
+    graph = await get_run_graph(session, run.id)
+    engine_hits = {(node.name, field.name): field.hits for node in graph.types for field in node.fields}
+    assert all(field.hits == engine_hits[(field.type_name, field.field_name)] for field in operation.fields)
+    assert engine_hits[("User", "name")] == 0
+    # An operation with no counted requests has no counted fields.
+    await observe(session, run.id, query_hash="b" * 64, fields=fields, data=uncounted_data)
+    uncounted = next(item for item in await list_operations(session, run.id)
+                     if item.operation_key == operation_key("b" * 64, "GetUsers", "query"))
+    assert uncounted.request_count == 1 and uncounted.counted_request_count == 0
+    assert uncounted.fields == []

@@ -125,7 +125,7 @@ class RequestOut(ApiModel):
 class OperationFieldOut(ApiModel):
     type_name: str
     field_name: str
-    request_count: int = Field(description="Requests selecting this field, once per request, including uncounted selections.")
+    hits: int = Field(description="Counted requests selecting this field, once per request: successful analysis with response_has_data=true.")
 
 
 class OperationOut(ApiModel):

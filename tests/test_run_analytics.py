@@ -78,7 +78,7 @@ def test_openapi_has_exact_analytics_dtos_and_public_access():
         "subscriptionRequests", "httpErrorCount", "graphqlErrorCount", "avgDurationMs",
         "totalFields", "coveredFields", "coveragePercent", "requestTimeline",
     }
-    assert set(models["OperationFieldOut"]["properties"]) == {"typeName", "fieldName", "requestCount"}
+    assert set(models["OperationFieldOut"]["properties"]) == {"typeName", "fieldName", "hits"}
     assert models["OperationOut"]["properties"]["operationName"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert models["RunStats"]["properties"]["avgDurationMs"]["anyOf"] == [{"type": "number"}, {"type": "null"}]
     assert paths["/graphql"]["post"]["security"] == [{"CoverageApiKey": []}]

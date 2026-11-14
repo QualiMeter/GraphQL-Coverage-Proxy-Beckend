@@ -83,13 +83,12 @@ async def list_operations(
 
     field_rows = (await session.execute(
         select(*identity, SchemaType.name.label("type_name"), SchemaField.name.label("field_name"),
-               func.count().label("request_count"))
+               func.count().label("hits"))
         .select_from(ObservedRequest)
         .join(RequestFieldUsage, RequestFieldUsage.request_id == ObservedRequest.id)
         .join(SchemaField, SchemaField.id == RequestFieldUsage.field_id)
         .join(SchemaType, SchemaType.id == SchemaField.type_id)
-        .where(*filters, SchemaType.snapshot_id == run.snapshot_id,
-               ObservedRequest.analysis_status == "success")
+        .where(*filters, SchemaType.snapshot_id == run.snapshot_id, _counted())
         .group_by(*identity, SchemaType.name, SchemaField.name)
         .order_by(SchemaType.name, SchemaField.name)
     )).mappings().all()
@@ -98,7 +97,7 @@ async def list_operations(
         key = (row["query_hash"], row["operation_name"], row["operation_type"])
         fields.setdefault(key, []).append(OperationFieldOut(
             type_name=row["type_name"], field_name=row["field_name"],
-            request_count=row["request_count"],
+            hits=row["hits"],
         ))
     return [OperationOut(
         operation_key=operation_key(row["query_hash"], row["operation_name"], row["operation_type"]),

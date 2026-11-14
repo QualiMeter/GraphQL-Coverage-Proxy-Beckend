@@ -356,7 +356,7 @@ type OperationType = "query" | "mutation" | "subscription";
 type OperationFieldOut = {
   typeName: string;
   fieldName: string;
-  requestCount: number; // целое, число обращений, выбравших поле
+  hits: number; // целое, число учтённых обращений, выбравших поле
 };
 
 type OperationOut = {
@@ -388,9 +388,9 @@ type OperationOut = {
     "avgDurationMs": 21.0,
     "lastSeenAt": "2026-11-13T13:07:10Z",
     "fields": [
-      {"typeName": "Query", "fieldName": "users", "requestCount": 3},
-      {"typeName": "User", "fieldName": "id", "requestCount": 3},
-      {"typeName": "User", "fieldName": "name", "requestCount": 3}
+      {"typeName": "Query", "fieldName": "users", "hits": 2},
+      {"typeName": "User", "fieldName": "id", "hits": 2},
+      {"typeName": "User", "fieldName": "name", "hits": 2}
     ]
   }
 ]
@@ -417,11 +417,19 @@ type OperationOut = {
   `response_has_data=true`. Прокси устанавливает последний флаг только для
   объекта `data`; `data: null` не учитывается. GraphQL-ошибки могут
   сосуществовать с данными, а HTTP-ошибка не отменяет это условие.
-- `fields` содержит координаты реально выбранных полей из `request_field_usage`
-  для успешного анализа, включая обращения без данных. Повтор одного поля или
-  его alias в одном обращении считается один раз. Это частота выбора поля,
-  а не отдельный процент покрытия и не число успешных resolver-вызовов.
-  Поля отсортированы по `typeName`, затем `fieldName`.
+- `fields` имеет контракт `[{typeName, fieldName, hits}]` и содержит координаты
+  полей из `request_field_usage`, выбранных хотя бы одним учтённым обращением.
+  `hits` использует то же условие Coverage Engine, что `countedRequestCount`:
+  `analysis_status=success AND response_has_data=true`. Повтор одного поля или
+  его alias в одном обращении считается один раз. В примере три успешных
+  анализа, но только два ответа с объектом `data`, поэтому `hits=2`.
+  Обращения с `response_has_data=false` или неизвестным флагом не увеличивают
+  `hits`; выбранные только в них поля отсутствуют в списке. Без учтённых полей
+  возвращается `fields: []`. HTTP/GraphQL-ошибки сами по себе не исключают
+  обращение с успешным анализом и данными. Это число учтённых обращений,
+  а не число успешных resolver-вызовов. Поля отсортированы по `typeName`, затем
+  `fieldName`. Метрики `requestCount` внутри `fields` нет; на уровне операции
+  она по-прежнему считает все обращения группы.
 - `httpErrorCount` — HTTP 400–599; `graphqlErrorCount` — сохранённый флаг
   `graphql_has_errors=true`. Счётчики независимы, обращение может увеличить оба.
   Неизвестный статус/флаг не считается ошибкой.
