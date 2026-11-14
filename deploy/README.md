@@ -18,9 +18,10 @@ PostgreSQL (`127.0.0.1:5432`), .NET (`5000/5100`), Redis (`6379`) и RustFS
 запуском нужно проверить его снова. Если меняете `API_PORT`, выберите другой
 свободный порт и скорректируйте команды `curl` ниже.
 
-Frontend, demo GraphQL API и конфигурация Nginx сюда не входят. Публичный доступ
-потребует отдельной настройки существующего reverse proxy и контроля доступа;
-текущая конфигурация оставляет API на loopback хоста.
+Frontend, demo GraphQL API и конфигурация Nginx в Compose не входят.
+На VPS внешний Nginx принимает запросы к `https://graphql.rebyte.fun` и
+передаёт разрешённые пути в API на loopback. Сам Docker по-прежнему не
+публикует API напрямую в Интернет.
 
 ## 1. Размещение файлов
 
@@ -84,13 +85,14 @@ API-контейнера указывает на сам контейнер.
 Для CORS задавайте точные origins со схемой и при необходимости портом,
 без пути и завершающего `/`; wildcard в production не используйте.
 
-При публикации `https://rebyte.fun/coverage/` Nginx должен использовать
-`location /coverage/ { proxy_pass http://127.0.0.1:5081/; }` с завершающим
-слешем: upstream получает `/docs`, `/openapi.json`, `/api/...` и `/graphql` без
-префикса. Uvicorn получает `--root-path /coverage` через `API_ROOT_PATH`, поэтому
-Swagger обращается к `/coverage/openapi.json`, а OpenAPI добавляет server URL
-`/coverage`. Не включайте полный proxy location до ограничения доступа:
-административные REST-методы и runId пока не авторизованы.
+Для выделенного домена `https://graphql.rebyte.fun` установите в
+`deploy/.env` **явно пустую** переменную `API_ROOT_PATH=`. Nginx должен
+проксировать `/health`, `/docs`, `/openapi.json`, `/api/…` и `/graphql`
+на `http://127.0.0.1:5081` с сохранением исходного пути.
+У Swagger будет `/openapi.json`, а не прежний `/coverage/openapi.json`.
+Старый путь `https://rebyte.fun/coverage/` не использовать для новых клиентов.
+Публичное чтение ограничено `isPublic=true`, административные изменения,
+журнал запросов и GraphQL-прокси защищены `COVERAGE_API_KEY`.
 
 `.env` исключён из Git, `.env.example` остаётся в репозитории. Не публикуйте
 `.env`, полный вывод `docker compose config` или `docker inspect`: они содержат

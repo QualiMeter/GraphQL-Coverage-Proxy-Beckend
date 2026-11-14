@@ -1,7 +1,13 @@
-# GraphQL Coverage Backend — DB/API foundation v0.1
+# GraphQL Coverage Backend — REST API / GraphQL Proxy v0.1
 
-Основа бэкенда хакатона Zunami: PostgreSQL-модель, первая миграция, реальные REST-методы
-для фронтенда и внутренний контракт для будущих модулей HTTP Proxy / GraphQL Analyzer.
+Бэкенд GraphQL Coverage: PostgreSQL, REST API для публичного каталога
+и администрирования, HTTP-прокси GraphQL и анализ покрытия по E2E-наблюдениям.
+
+**Production:** [Swagger](https://graphql.rebyte.fun/docs) ·
+[OpenAPI](https://graphql.rebyte.fun/openapi.json) ·
+публичный API: `https://graphql.rebyte.fun/api/...`.
+Регистрация для просмотра опубликованных сервисов не нужна. Все изменяющие
+операции и GraphQL-прокси защищены серверным API-ключом.
 
 ## Что уже работает
 
@@ -9,7 +15,7 @@
   отдельная миграция для приватности сервисов.
 - Импорт схемы из **SDL** и через GraphQL introspection с разбором полей и SHA-256 снимка.
 - Создание сервиса и прогона E2E; запрет второго активного прогона в рамках снимка схемы.
-- Сохранение наблюдения через Python-функцию \`app.services.record_observation()\`.
+- Сохранение наблюдения через Python-функцию `app.services.record_observation()`.
 - Подсчёт уникального покрытия полей и числа запросов, затронувших каждое поле.
 - REST API и автоматическая документация Swagger/OpenAPI.
 - `POST /graphql` — HTTP-прокси на адрес из `TARGET_GRAPHQL_URL`.
@@ -24,9 +30,9 @@
 
 Нужен Docker с Compose:
 
-\`\`\`bash
+```bash
 docker compose up --build -d
-\`\`\`
+```
 
 Compose поднимет PostgreSQL 16, применит миграцию Alembic и запустит FastAPI.
 
@@ -35,16 +41,16 @@ Compose поднимет PostgreSQL 16, применит миграцию Alembi
 - OpenAPI JSON: http://localhost:8000/openapi.json
 - PostgreSQL на хосте: 127.0.0.1:5432
 
-Учётные данные PostgreSQL в \`compose.yaml\` только для локальной разработки.
+Учётные данные PostgreSQL в `compose.yaml` только для локальной разработки.
 В реальном окружении используйте отдельные секреты.
 
 Проверка:
 
-\`\`\`bash
+```bash
 curl http://localhost:8000/health
-\`\`\`
+```
 
-Ожидаемый ответ: \`{"status":"ok"}\`.
+Ожидаемый ответ: `{"status":"ok"}`.
 
 ## Приватные и публичные сервисы
 
@@ -66,26 +72,27 @@ curl http://localhost:8000/health
 - Секретный ключ допустим только на сервере или в защищённой CI-среде,
   не в React/Vite-приложении.
 
-Доступ к REST API через выделенный `graphql.rebyte.fun` будет настроен отдельно,
-после проверки защищённых маршрутов в production.
+Публичный REST API доступен на `https://graphql.rebyte.fun` без префикса
+`/coverage`. Для разработчиков интерфейса актуальный контракт, примеры ответов
+и настройки CORS описаны в [docs/frontend-api.md](docs/frontend-api.md).
 
 ## Запуск без Docker для API (PostgreSQL нужен отдельно)
 
-\`\`\`bash
+```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[test]'
 cp .env.example .env
-\`\`\`
+```
 
-Переменные из \`.env\` нужно экспортировать в окружение (файл не загружается автоматически):
+Переменные из `.env` нужно экспортировать в окружение (файл не загружается автоматически):
 
-\`\`\`bash
+```bash
 export DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage
 export CORS_ORIGINS=http://localhost:5173
 alembic upgrade head
 uvicorn app.main:app --reload
-\`\`\`
+```
 
 ## Интеграция E2E-наблюдений
 
@@ -149,68 +156,70 @@ Hop-by-hop заголовки, указанные в `Connection` заголов
 
 ## Импорт схемы через introspection
 
-Укажите GraphQL endpoint только в серверной переменной \`TARGET_GRAPHQL_URL\`.
+Укажите GraphQL endpoint только в серверной переменной `TARGET_GRAPHQL_URL`.
 Для импорта схемы существующего сервиса:
 
 ```bash
 curl -i http://localhost:8000/api/schemas/import/introspection \
   -H 'Content-Type: application/json' \
+  -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
   -d '{"serviceId":"<UUID созданного сервиса>"}'
 ```
 
-Ответ — \`201 Created\` и \`SchemaOut\` с \`source: "introspection"\`.
+Ответ — `201 Created` и `SchemaOut` с `source: "introspection"`.
 Повторный импорт идентичной схемы использует существующий snapshot.
 Адрес upstream нельзя передать в JSON (все лишние поля отвергаются с 422).
 Отсутствующая или некорректная конфигурация даёт 503, недоступный upstream
 или невалидная introspection-схема — 502, неизвестный serviceId — 404.
 
 Collector пока не передаёт пользовательские Bearer-токены на upstream.
-Этот маршрут, как и остальные административные операции, **не имеет авторизации**:
-до публичного открытия API необходимо ограничить доступ и добавить авторизацию.
+Импорт схемы, как и другие административные операции, требует
+`X-Coverage-Api-Key`. Ключ нельзя хранить в публичном фронтенде.
 
 ## Обращение фронтенда
 
 Подробный контракт: [docs/frontend-api.md](docs/frontend-api.md).
 Договорённость: JSON-имена — camelCase, идентификаторы — UUID, время — ISO 8601 UTC.
 
-Порядок работы:
+Порядок работы серверного администратора/CI (изменяющие методы требуют
+`X-Coverage-Api-Key`):
 
-1. \`POST /api/services\` — создаём запись сервиса.
-2. \`POST /api/schemas/import\` — импортируем SDL, получаем \`schemaId\` (в ответе \`id\`).
-3. \`GET /api/schemas/{schemaId}/graph\` — карта ещё без данных о прогонах.
-4. \`POST /api/runs\` — запускаем прогон.
-5. Позже прокси записывает наблюдения через \`record_observation()\`.
-6. \`GET /api/runs/{runId}/coverage\` — получаем реальные поля, связи и покрытие.
-7. \`POST /api/runs/{runId}/finish\` — закрываем прогон.
+1. `POST /api/services` — создаём запись сервиса.
+2. `POST /api/schemas/import` — импортируем SDL, получаем `schemaId` (в ответе `id`).
+3. `GET /api/schemas/{schemaId}/graph` — карта ещё без данных о прогонах.
+4. `POST /api/runs` — запускаем прогон.
+5. Позже прокси записывает наблюдения через `record_observation()`.
+6. `GET /api/runs/{runId}/coverage` — получаем реальные поля, связи и покрытие.
+7. `POST /api/runs/{runId}/finish` — закрываем прогон.
 
 ## Тесты
 
-\`\`\`bash
+```bash
 pip install -e '.[test]'
 pytest -q
-\`\`\`
+```
 
-Интеграционный тест PostgreSQL работает только с переменной \`TEST_DATABASE_URL\`.
+Интеграционный тест PostgreSQL работает только с переменной `TEST_DATABASE_URL`.
 Он использует откатываемую внешнюю транзакцию и требует уже созданных таблиц:
 
-\`\`\`bash
+```bash
 export TEST_DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage
 pytest -q -m integration
-\`\`\`
+```
 
 Используйте только выделенную тестовую БД. Если переменная не задана,
 интеграционный тест пропускается (это не считается доказательством работы БД).
 
 ## Подключение остальных бэкендеров
 
-- Общие типы: \`app/contracts.py\`.
-- GraphQL Analyzer должен выдавать \`AnalysisResult\` со списком \`FieldReference\`.
+- Общие типы: `app/contracts.py`.
+- GraphQL Analyzer должен выдавать `AnalysisResult` со списком `FieldReference`.
 - Proxy вызывает `capture_e2e_exchange()` после ответа upstream для запросов
   с runId; реальный Analyzer подключён через `app.analyzer_adapter`.
 - Хеш запроса — SHA-256 текста GraphQL; не хранить переменные, авторизацию и cookies.
-- \`response_has_data=True\` означает, что GraphQL-ответ содержит объект \`data\`, а не \`null\`;
+- `response_has_data=True` означает, что GraphQL-ответ содержит объект `data`, а не `null`;
   только такие успешно проанализированные запросы идут в процент покрытия.
-- GraphQL ошибки могут сосуществовать с \`data\`; процент отражает выбранные поля,
+- GraphQL ошибки могут сосуществовать с `data`; процент отражает выбранные поля,
   а не успешность выполнения каждого вложенного resolver.
 
-Изменения в \`contracts.py\` согласовываются между разработчиками.
+Изменения в `contracts.py` согласовываются между разработчиками.
