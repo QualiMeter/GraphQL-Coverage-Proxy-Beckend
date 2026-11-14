@@ -4,12 +4,15 @@ import os
 import uuid
 
 import pytest
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.contracts import AnalysisResult, FieldReference, RequestObservationInput
+from app.models import ObservedRequest, RequestFieldUsage
 from app.services import (
-    ConflictError, create_run, create_service, finish_run, get_run_graph,
-    import_sdl, record_observation,
+    ConflictError, InvalidReferenceError, create_run, create_service, finish_run, get_run_graph,
+    import_sdl, list_requests, record_observation,
 )
 
 
@@ -154,3 +157,98 @@ async def test_coverage_summary_counts_only_object_fields(postgres_session):
     assert (graph.summary.covered_fields, graph.summary.total_fields) == (6, 9)
     assert graph.summary.coverage_percent == 66.67
     assert next(node for node in graph.types if node.name == "Node").fields[0].hits == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "status, has_data, has_errors, fields, expected_hits, rejected",
+    [
+        ("success", False, True, ("health",), 0, False),
+        ("success", True, True, ("health",), 1, False),
+        ("validation_error", True, True, (), 0, False),
+        ("success", True, False, ("health", "missing"), 0, True),
+    ],
+    ids=["no-data", "partial-errors", "analysis-error", "unknown-field"],
+)
+async def test_observation_storage_and_coverage(
+    postgres_session, status, has_data, has_errors, fields, expected_hits, rejected,
+):
+    session = postgres_session
+    service = await create_service(session, "test-" + uuid.uuid4().hex, "Observation rules")
+    schema = await import_sdl(session, service.id, "type Query { health: String }")
+    run = await create_run(session, schema.id, "Observation rules", {})
+    observation = RequestObservationInput(
+        run_id=run.id,
+        analysis=AnalysisResult(
+            status=status,
+            operation_type="query",
+            operation_name=None,
+            fields=tuple(FieldReference("Query", field) for field in fields),
+        ),
+        http_method="POST",
+        http_status=200,
+        response_has_data=has_data,
+        graphql_has_errors=has_errors,
+        duration_ms=7,
+    )
+
+    if rejected:
+        with pytest.raises(InvalidReferenceError):
+            await record_observation(session, observation)
+    else:
+        await record_observation(session, observation)
+
+    requests = await list_requests(session, run.id, limit=10, offset=0)
+    assert len(requests) == (0 if rejected else 1)
+    if requests:
+        assert requests[0].analysis_status == status
+        assert requests[0].response_has_data is has_data
+        assert requests[0].graphql_has_errors is has_errors
+
+    graph = await get_run_graph(session, run.id)
+    assert graph.summary.covered_fields == expected_hits
+    query = next(node for node in graph.types if node.name == "Query")
+    assert query.fields[0].hits == expected_hits
+
+
+@pytest.mark.integration
+async def test_observation_rolls_back_when_field_usage_insert_fails(postgres_session):
+    session = postgres_session
+    service = await create_service(session, "test-" + uuid.uuid4().hex, "Observation rollback")
+    schema = await import_sdl(session, service.id, "type Query { health: String }")
+    run = await create_run(session, schema.id, "Observation rollback", {})
+    observation = RequestObservationInput(
+        run_id=run.id,
+        analysis=AnalysisResult(
+            status="success",
+            operation_type="query",
+            operation_name=None,
+            fields=(FieldReference("Query", "health"),),
+        ),
+        http_method="POST",
+        http_status=200,
+        response_has_data=True,
+        graphql_has_errors=False,
+        duration_ms=7,
+    )
+
+    # The constraint lives in the same savepoint as the failed write.
+    usage_count = select(func.count()).select_from(RequestFieldUsage)
+    previous_usage_count = await session.scalar(usage_count)
+    await session.execute(text(
+        "ALTER TABLE request_field_usage "
+        "ADD CONSTRAINT test_reject_field_usage CHECK (false) NOT VALID"
+    ))
+    with pytest.raises(IntegrityError, match="test_reject_field_usage"):
+        await record_observation(session, observation)
+    await session.rollback()
+
+    request_count = select(func.count()).select_from(ObservedRequest).where(
+        ObservedRequest.run_id == run.id
+    )
+    assert await session.scalar(request_count) == 0
+    assert await session.scalar(usage_count) == previous_usage_count
+
+    await record_observation(session, observation)
+    assert await session.scalar(request_count) == 1
+    assert await session.scalar(usage_count) == previous_usage_count + 1
