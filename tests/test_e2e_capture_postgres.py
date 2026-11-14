@@ -112,7 +112,7 @@ async def test_capture_persists_real_run_observation_and_only_analyzed_fields(po
     unsupported = await session.get(ObservedRequest, unsupported_id)
     assert unsupported.analysis_status == "unsupported"
     assert unsupported.query_hash is None
-    assert unsupported.response_has_data is True
+    assert unsupported.response_has_data is False
     assert unsupported.graphql_has_errors is True
     graph = await get_run_graph(session, run.id)
     assert graph.summary.covered_fields == 2

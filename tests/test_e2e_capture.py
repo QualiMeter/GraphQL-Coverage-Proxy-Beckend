@@ -38,7 +38,9 @@ def test_unsupported_request_body_does_not_produce_query_input(body):
     ("body", "expected"),
     [
         (b'{"data":{"user":{"id":"1"}}}', (True, False)),
-        (b'{"data":null,"errors":[{"message":"private"}]}', (True, True)),
+        (b'{"data":null,"errors":[{"message":"private"}]}', (False, True)),
+        (b'{"data":{}}', (True, False)),
+        (b'{"data":"invalid"}', (False, False)),
         (b'{"errors":[{"message":"failed"}]}', (False, True)),
         (b'{"errors":[]}', (False, False)),
         (b"not-json", (None, None)),

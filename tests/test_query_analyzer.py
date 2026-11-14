@@ -210,3 +210,15 @@ def test_field_reference_contract_is_used():
     result = analyze_query(SCHEMA, GraphQLQueryInput(query="{ health }"))
 
     assert result.fields == (FieldReference("Query", "health"),)
+
+
+def test_missing_operation_name_does_not_persist_untrusted_client_text():
+    result = analyze_query(
+        SCHEMA,
+        GraphQLQueryInput(query="query Safe { health }", operation_name="secret-client-value"),
+    )
+
+    assert result.status == "validation_error"
+    assert result.error_code == "OPERATION_NOT_FOUND"
+    assert result.operation_name is None
+    assert result.fields == ()
