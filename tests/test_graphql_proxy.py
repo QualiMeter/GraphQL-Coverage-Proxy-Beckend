@@ -57,7 +57,6 @@ async def test_forwards_original_body_and_applicable_headers(operation, client, 
         "Accept": "application/graphql-response+json",
         "Authorization": "Bearer private-token",
         "Cookie": "session=private-cookie",
-        "X-Coverage-Run-Id": "not-a-uuid",
         "Connection": "keep-alive, X-Private-Hop",
         "X-Private-Hop": "drop-me",
         "Proxy-Authorization": "Basic private-proxy-token",
@@ -273,7 +272,6 @@ async def test_strips_client_forwarding_headers_and_preserves_request(casing, cl
         "Accept": "application/graphql-response+json",
         "Connection": "X-Private-Hop",
         "X-Private-Hop": "drop-me",
-        "X-Coverage-Run-Id": "drop-me",
         "X-Request-Id": "preserved",
     })
     body = b'{ "query": "query Test { health }", "variables": {}, "operationName": "Test" }\n'

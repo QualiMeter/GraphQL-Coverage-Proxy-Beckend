@@ -220,7 +220,10 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
     The proxy must supply truthful upstream metadata. Cross-snapshot field
     references are rejected atomically. A failed analysis may have no fields.
     """
-    run = await session.scalar(select(TestRun).where(TestRun.id == observation.run_id).with_for_update())
+    run = await session.scalar(
+        select(TestRun).where(TestRun.id == observation.run_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if run is None:
         raise NotFoundError("Test run not found")
     if run.status != "running":

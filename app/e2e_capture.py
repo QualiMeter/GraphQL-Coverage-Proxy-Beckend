@@ -1,4 +1,4 @@
-"""In-memory GraphQL exchange processing for the future instrumented proxy.
+"""In-memory GraphQL exchange processing for the instrumented proxy.
 
 The analyzer is injected explicitly. This module never invents covered fields
 and never persists GraphQL documents, variables, response bodies or credentials.
@@ -25,7 +25,7 @@ def parse_graphql_request(body: bytes) -> GraphQLQueryInput | None:
     """Decode a single standard GraphQL-over-HTTP JSON request, if supported."""
     try:
         payload = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
 
     if not isinstance(payload, dict):
@@ -58,11 +58,24 @@ def graphql_response_flags(decoded_body: bytes | None) -> tuple[bool | None, boo
         return None, None
     try:
         payload = json.loads(decoded_body)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None, None
     if not isinstance(payload, dict):
         return None, None
     return "data" in payload, bool(payload.get("errors"))
+
+
+async def load_run_snapshot(session: AsyncSession, run_id: uuid.UUID) -> SchemaSnapshot:
+    """Resolve only the specified running run and its immutable schema snapshot."""
+    run = await session.get(TestRun, run_id, populate_existing=True)
+    if run is None:
+        raise NotFoundError("Test run not found")
+    if run.status != "running":
+        raise ConflictError("Cannot record observations for a finished run")
+    snapshot = await session.get(SchemaSnapshot, run.snapshot_id)
+    if snapshot is None:
+        raise NotFoundError("Schema snapshot not found")
+    return snapshot
 
 
 async def capture_e2e_exchange(
@@ -78,18 +91,10 @@ async def capture_e2e_exchange(
 ) -> uuid.UUID:
     """Analyze one completed upstream exchange and commit its observation.
 
-    Integrate this behind /graphql only once a real AST analyzer is available.
-    The upstream request and response must be delivered without modification;
-    this function receives in-memory copies solely for analysis.
+    The proxy awaits this commit before delivering the upstream response.
+    This function receives in-memory copies solely for analysis.
     """
-    run = await session.get(TestRun, run_id)
-    if run is None:
-        raise NotFoundError("Test run not found")
-    if run.status != "running":
-        raise ConflictError("Cannot record observations for a finished run")
-    snapshot = await session.get(SchemaSnapshot, run.snapshot_id)
-    if snapshot is None:
-        raise NotFoundError("Schema snapshot not found")
+    snapshot = await load_run_snapshot(session, run_id)
 
     gql_input = parse_graphql_request(request_body)
     query_hash: str | None = None
