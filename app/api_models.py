@@ -7,6 +7,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from app.contracts import OperationType
+
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -118,3 +120,44 @@ class RequestOut(ApiModel):
     duration_ms: int | None
     error_code: str | None
     created_at: datetime
+
+
+class OperationFieldOut(ApiModel):
+    type_name: str
+    field_name: str
+    hits: int = Field(description="Counted requests selecting this field, once per request: successful analysis with response_has_data=true.")
+
+
+class OperationOut(ApiModel):
+    operation_key: str = Field(description="SHA-256 of the JSON tuple [query_hash, operationName, operationType]. Stable across runs.")
+    operation_name: str | None
+    operation_type: OperationType
+    request_count: int
+    counted_request_count: int = Field(description="Successful analysis with response_has_data=true, as in Coverage Engine.")
+    graphql_error_count: int
+    http_error_count: int
+    avg_duration_ms: float | None = Field(description="Mean over known durations only; null when none are known.")
+    last_seen_at: datetime
+    fields: list[OperationFieldOut]
+
+
+class RequestTimelineBucket(ApiModel):
+    bucket_start: datetime = Field(description="Inclusive start of a one-minute UTC interval; end is exclusive. Empty intervals are omitted.")
+    request_count: int
+    counted_request_count: int
+    graphql_error_count: int
+    http_error_count: int
+    avg_duration_ms: float | None
+
+
+class RunStats(CoverageSummary):
+    total_requests: int
+    counted_requests: int
+    unique_operations: int = Field(description="Groups with known query_hash and operation_type, including anonymous operations.")
+    query_requests: int
+    mutation_requests: int
+    subscription_requests: int = Field(description="Observed subscription metadata only; subscriptions remain unsupported by the analyzer.")
+    http_error_count: int
+    graphql_error_count: int
+    avg_duration_ms: float | None = Field(description="Mean over known durations only; null when none are known.")
+    request_timeline: list[RequestTimelineBucket]
