@@ -29,6 +29,12 @@ class SchemaImport(ApiModel):
     sdl: str = Field(min_length=1, max_length=1_000_000)
 
 
+class SchemaIntrospectionImport(ApiModel):
+    # The upstream address must come from server configuration only.
+    model_config = ConfigDict(extra="forbid")
+    service_id: uuid.UUID
+
+
 class SchemaOut(ApiModel):
     id: uuid.UUID
     service_id: uuid.UUID
