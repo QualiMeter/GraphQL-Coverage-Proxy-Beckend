@@ -28,7 +28,9 @@ services:
       TARGET_GRAPHQL_URL: ${TARGET_GRAPHQL_URL:-}
       COVERAGE_API_KEY: ${COVERAGE_API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
-      API_ROOT_PATH: ${API_ROOT_PATH:-/coverage}
+      # The '-' form uses the default only when unset; an explicit empty
+      # API_ROOT_PATH is required when the API moves to its own subdomain.
+      API_ROOT_PATH: ${API_ROOT_PATH-/coverage}
     ports:
       - "127.0.0.1:${API_PORT:-5081}:8000"
     networks:

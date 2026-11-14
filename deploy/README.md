@@ -72,7 +72,7 @@ ${EDITOR:-nano} deploy/.env
 | Переменная | Назначение |
 | --- | --- |
 | `API_PORT` | Порт на loopback хоста; по умолчанию `5081` |
-| `API_ROOT_PATH` | Публичный префикс, который Nginx убирает при проксировании; в production по умолчанию `/coverage` |
+| `API_ROOT_PATH` | Публичный префикс, который Nginx убирает при проксировании; если не задан — `/coverage`, для отдельного домена `graphql.rebyte.fun` установить `API_ROOT_PATH=` (пустое значение) |
 | `TARGET_GRAPHQL_URL` | Необязательный URL целевого GraphQL API; можно оставить пустым |
 | `COVERAGE_API_KEY` | Секрет длиной от 32 символов для приватных REST-операций и `/graphql`; `openssl rand -hex 32`; хранить только в `deploy/.env` |
 | `CORS_ORIGINS` | Разрешённые origins через запятую, например `https://coverage.example.com`; пустое значение отключает cross-origin доступ |
