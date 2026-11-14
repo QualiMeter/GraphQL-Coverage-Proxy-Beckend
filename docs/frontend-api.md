@@ -1,31 +1,39 @@
 # Контракт для фронтенда — GraphQL Coverage API v0.1
 
-Статус: **REST API и GraphQL HTTP-прокси реализованы; production API доступен
-на отдельном HTTPS-поддомене**. Некоторые операции требуют серверного API-ключа.
+Статус: **REST API и GraphQL HTTP-прокси работают в production**.
+React-фронтенд развёрнут по `https://graphql.rebyte.fun/coverage/` и пока
+использует локальные demo/mock-данные. Некоторые операции требуют серверного
+API-ключа; новые маршруты аналитики операций и статистики пока в плане.
 
 ## 1. Настройки подключения
 
-- Production API: `https://graphql.rebyte.fun` (**без** `/coverage`).
-- Локальный API: `http://localhost:8000`.
-- Vite production: `VITE_API_BASE_URL=https://graphql.rebyte.fun`.
-- Vite local: `VITE_API_BASE_URL=http://localhost:8000`.
+- Production frontend: `https://graphql.rebyte.fun/coverage/`.
+- Production REST API: `https://graphql.rebyte.fun/api/...` (**без** `/coverage`).
+- Production React-запросы: относительные пути, например `fetch('/api/services')`.
+  Фронтенд и API имеют один origin, поэтому CORS между ними не нужен.
+- Локальный Vite (`http://localhost:5173`) уже проксирует `/api` на
+  `https://graphql.rebyte.fun`; тот же относительный `fetch` работает локально.
+- Отдельно запущенный локальный backend: `http://localhost:8000`
+  (при необходимости поменяйте target Vite proxy).
+- `VITE_API_BASE_URL` и другие абсолютные URL не требуются для текущей
+  production-схемы. При намеренном cross-origin запросе CORS настраивается
+  отдельно для конкретного origin; не используйте `*` для авторизованного UI.
 - Swagger: `https://graphql.rebyte.fun/docs` (`GET /docs`).
 - OpenAPI: `https://graphql.rebyte.fun/openapi.json` (`GET /openapi.json`).
 - JSON в запросах и ответах: `camelCase`.
 - Идентификаторы: строки UUID.
 - Время: ISO 8601, UTC.
-- CORS для разработки: `http://localhost:5173`; production origin фронтенда
-  администратор должен явно добавить в `CORS_ORIGINS` на VPS. Просто открыть URL
-  API в браузере недостаточно, чтобы cross-origin `fetch` работал.
 
 **Важное разделение:** публичный React-фронтенд использует только открытые
 `GET /api/...` для опубликованных сервисов. Административные операции и
 `POST /graphql` доступны только доверенному серверу/CI через заголовок
 `X-Coverage-Api-Key`. **Нельзя** помещать этот ключ в `VITE_*`, JavaScript,
 `localStorage` или код приложения: он будет доступен всем посетителям.
-Для административного UI понадобится отдельный серверный посредник с нормальной
-аутентификацией пользователей; регистрации у публичного каталога нет.
-Фронтенд не имитирует наблюдения и не пересчитывает покрытие.
+Для административного UI понадобится серверная аутентификация пользователей
+и проверка прав на конкретный сервис; одной открытой регистрации недостаточно.
+Регистрации у публичного каталога нет. После API-интеграции фронтенд должен
+показывать реальные наблюдения и готовые метрики сервера, а не mock-данные
+или собственную альтернативную формулу покрытия.
 
 ### Публичность и доступ
 
@@ -60,7 +68,25 @@
 | 11 | `PATCH /api/services/{serviceId}` | Сервер администратора: переключить видимость (ключ) |
 | 12 | `POST /api/schemas/import/introspection` | Сервер администратора: импортировать через upstream (ключ) |
 
-Для первого публичного демо достаточно GET-маршрутов 1, 4, 5, 7 и 8.
+Для первой интеграции с реальным API достаточно GET-маршрутов 1, 4, 5, 7 и 8.
+
+### Следующий этап — агрегированная аналитика (пока не реализовано)
+
+Предложены два новых **P0** endpoint для уже существующих страниц фронтенда:
+
+- `GET /api/runs/{runId}/operations` — группировка наблюдений по
+  `query_hash`, имени и типу операции, счётчики, ошибки, среднее время и поля
+  через `request_field_usage`.
+- `GET /api/runs/{runId}/stats` — число обращений/операций, типы, HTTP/GraphQL
+  ошибки, временная шкала и показатели существующего Coverage Engine.
+
+**Не вызывайте эти маршруты как готовые:** сначала требуется реализация и
+закрепление точных DTO в OpenAPI. План доступа: агрегаты опубликованного сервиса
+публичны, приватного — доступны только авторизованному клиенту.
+
+**P1:** фильтры защищённого `GET /api/runs/{runId}/requests`, подробности
+`GET /api/runs/{runId}/requests/{requestId}` и сравнение прогонов.
+Пока они также не являются частью реализованного публичного контракта.
 
 ## 3. Создать сервис
 
@@ -313,11 +339,8 @@
 ## 9. Как вызывать из React + TypeScript
 
 ```ts
-// VITE_API_BASE_URL для production = https://graphql.rebyte.fun
-// Это публичный адрес, а НЕ место для хранения административного ключа.
-const API = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000")
-  .replace(/\/$/, "");
-
+// Относительный путь работает в production и через локальный Vite proxy.
+// Административный API-ключ в браузер не передаём.
 type CoverageSummary = {
   totalFields: number;
   coveredFields: number;
@@ -325,7 +348,7 @@ type CoverageSummary = {
 };
 
 async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(API + path);
+  const response = await fetch(path);
   if (!response.ok) {
     throw new Error("API returned HTTP " + response.status);
   }
