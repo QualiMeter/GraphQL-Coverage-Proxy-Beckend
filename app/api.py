@@ -7,14 +7,18 @@ from graphql import GraphQLError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import (
-    CoverageGraph, RequestOut, RunCreate, RunOut, SchemaImport, SchemaOut,
-    ServiceCreate, ServiceOut,
+    CoverageGraph, RequestOut, RunCreate, RunOut, SchemaImport, SchemaIntrospectionImport,
+    SchemaOut, ServiceCreate, ServiceOut,
 )
+from app.config import target_graphql_url
 from app.database import get_session
+from app.schema_collector import (
+    InvalidIntrospectionResponseError, InvalidSchemaTargetURLError, SchemaConnectionError,
+)
 from app.services import (
     ConflictError, NotFoundError, create_run, create_service, finish_run,
-    get_graph, get_run_graph, import_sdl, list_requests, list_runs,
-    list_schemas, list_services,
+    get_graph, get_run_graph, import_introspection_schema, import_sdl,
+    list_requests, list_runs, list_schemas, list_services,
 )
 
 
@@ -49,6 +53,30 @@ async def post_schema(payload: SchemaImport, session: AsyncSession = Session):
         return await import_sdl(session, payload.service_id, payload.sdl)
     except (NotFoundError, ConflictError, ValueError, GraphQLError) as exc:
         raise api_errors(exc) from exc
+
+
+@router.post("/schemas/import/introspection", status_code=201, response_model=SchemaOut)
+async def post_introspection_schema(
+    payload: SchemaIntrospectionImport, session: AsyncSession = Session
+):
+    # Clients cannot select an arbitrary target; the same configured upstream
+    # is used for the /graphql proxy and schema introspection.
+    target_url = target_graphql_url()
+    if not target_url:
+        raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured")
+    try:
+        return await import_introspection_schema(session, payload.service_id, target_url)
+    except NotFoundError as exc:
+        raise api_errors(exc) from exc
+    except InvalidSchemaTargetURLError:
+        raise HTTPException(
+            status_code=503, detail="TARGET_GRAPHQL_URL is not configured correctly"
+        ) from None
+    except (SchemaConnectionError, InvalidIntrospectionResponseError):
+        # Do not expose upstream response bodies, GraphQL errors or URLs.
+        raise HTTPException(
+            status_code=502, detail="GraphQL schema introspection failed"
+        ) from None
 
 
 @router.get("/schemas", response_model=list[SchemaOut])
