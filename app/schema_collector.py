@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from graphql import (
     GraphQLError,
@@ -55,10 +56,21 @@ async def collect_schema(
     """
     import httpx
 
+    # URL userinfo makes HTTPX synthesize Basic Auth, overriding forwarded
+    # Authorization headers and potentially exposing credentials in logs.
+    # Validate before creating a request, including an empty userinfo prefix.
+    try:
+        url = httpx.URL(target_url)
+        has_userinfo = "@" in urlsplit(target_url).netloc
+    except (httpx.InvalidURL, ValueError):
+        raise SchemaConnectionError("Configured GraphQL endpoint URL is invalid") from None
+    if url.scheme not in ("http", "https") or not url.host or has_userinfo:
+        raise SchemaConnectionError("Configured GraphQL endpoint URL is invalid")
+
     try:
         async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
             response = await client.post(
-                target_url,
+                url,
                 json={"query": get_introspection_query()},
             )
             response.raise_for_status()
