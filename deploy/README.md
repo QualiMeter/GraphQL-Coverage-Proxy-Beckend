@@ -2,8 +2,8 @@
 
 Эта конфигурация запускает существующий FastAPI backend и PostgreSQL 16 Alpine
 отдельным Compose-проектом `graphql-coverage`. Она предназначена для VPS Ubuntu
-26.04.1 LTS с уже установленными Docker и Docker Compose. Все команды ниже
-выполняет оператор на VPS; автоматического подключения или deploy здесь нет.
+26.04.1 LTS с уже установленными Docker и Docker Compose. Команды ручного запуска ниже выполняет оператор на VPS. Отдельный безопасный
+автодеплой через GitHub Actions описан в [AUTODEPLOY.md](AUTODEPLOY.md).
 
 API публикуется только на `127.0.0.1:5081`, внутри контейнера слушает `8000`.
 PostgreSQL доступен API как `db:5432` в собственной bridge-сети
@@ -75,10 +75,10 @@ ${EDITOR:-nano} deploy/.env
 | `TARGET_GRAPHQL_URL` | Необязательный URL целевого GraphQL API; можно оставить пустым |
 | `CORS_ORIGINS` | Разрешённые origins через запятую, например `https://coverage.example.com`; пустое значение отключает cross-origin доступ |
 
-В текущем backend на `main` переменная `TARGET_GRAPHQL_URL` ещё не читается:
-Compose передаёт её в контейнер для будущей интеграции GraphQL proxy.
-Она сама по себе не добавляет endpoint `/graphql`. При будущей настройке URL
-учтите, что `127.0.0.1` внутри API-контейнера указывает на сам контейнер.
+Текущий backend использует `TARGET_GRAPHQL_URL` для `/graphql` и импорта схемы
+через introspection. Если URL не задан, `/graphql` вернёт 503, но REST/health
+продолжат работать. При настройке URL учтите, что `127.0.0.1` внутри
+API-контейнера указывает на сам контейнер.
 Для CORS задавайте точные origins со схемой и при необходимости портом,
 без пути и завершающего `/`; wildcard в production не используйте.
 
