@@ -29,6 +29,10 @@ class SchemaConnectionError(SchemaCollectionError):
     """The configured GraphQL endpoint could not return an HTTP response."""
 
 
+class InvalidSchemaTargetURLError(SchemaConnectionError):
+    """The configured GraphQL endpoint URL is missing or invalid."""
+
+
 class InvalidIntrospectionResponseError(SchemaCollectionError):
     """The endpoint responded, but did not return a usable GraphQL schema."""
 
@@ -63,9 +67,9 @@ async def collect_schema(
         url = httpx.URL(target_url)
         has_userinfo = "@" in urlsplit(target_url).netloc
     except (httpx.InvalidURL, ValueError):
-        raise SchemaConnectionError("Configured GraphQL endpoint URL is invalid") from None
+        raise InvalidSchemaTargetURLError("Configured GraphQL endpoint URL is invalid") from None
     if url.scheme not in ("http", "https") or not url.host or has_userinfo:
-        raise SchemaConnectionError("Configured GraphQL endpoint URL is invalid")
+        raise InvalidSchemaTargetURLError("Configured GraphQL endpoint URL is invalid")
 
     try:
         async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
