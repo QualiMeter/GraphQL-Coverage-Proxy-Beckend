@@ -72,6 +72,7 @@ ${EDITOR:-nano} deploy/.env
 | Переменная | Назначение |
 | --- | --- |
 | `API_PORT` | Порт на loopback хоста; по умолчанию `5081` |
+| `API_ROOT_PATH` | Публичный префикс, который Nginx убирает при проксировании; в production по умолчанию `/coverage` |
 | `TARGET_GRAPHQL_URL` | Необязательный URL целевого GraphQL API; можно оставить пустым |
 | `CORS_ORIGINS` | Разрешённые origins через запятую, например `https://coverage.example.com`; пустое значение отключает cross-origin доступ |
 
@@ -81,6 +82,14 @@ ${EDITOR:-nano} deploy/.env
 API-контейнера указывает на сам контейнер.
 Для CORS задавайте точные origins со схемой и при необходимости портом,
 без пути и завершающего `/`; wildcard в production не используйте.
+
+При публикации `https://rebyte.fun/coverage/` Nginx должен использовать
+`location /coverage/ { proxy_pass http://127.0.0.1:5081/; }` с завершающим
+слешем: upstream получает `/docs`, `/openapi.json`, `/api/...` и `/graphql` без
+префикса. Uvicorn получает `--root-path /coverage` через `API_ROOT_PATH`, поэтому
+Swagger обращается к `/coverage/openapi.json`, а OpenAPI добавляет server URL
+`/coverage`. Не включайте полный proxy location до ограничения доступа:
+административные REST-методы и runId пока не авторизованы.
 
 `.env` исключён из Git, `.env.example` остаётся в репозитории. Не публикуйте
 `.env`, полный вывод `docker compose config` или `docker inspect`: они содержат
@@ -118,7 +127,8 @@ docker compose --env-file deploy/.env -f deploy/compose.production.yaml logs --t
 
 БД проходит `pg_isready` healthcheck, затем API выполняет `alembic upgrade head`.
 Только при успешных миграциях запускается
-`uvicorn app.main:app --host 0.0.0.0 --port 8000`. `exec` передаёт процессу
+`uvicorn app.main:app --host 0.0.0.0 --port 8000 --root-path "$API_ROOT_PATH"`.
+`exec` передаёт процессу
 uvicorn сигналы остановки. Оба контейнера используют `restart: unless-stopped`.
 Команда `up -d` сама по себе не подтверждает готовность API: проверьте состояние,
 логи миграций и HTTP-запросы ниже. При циклических рестартах исправьте причину
