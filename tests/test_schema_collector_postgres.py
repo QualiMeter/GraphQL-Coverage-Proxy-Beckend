@@ -10,7 +10,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import app.services as services
-from app.models import SchemaField, SchemaSnapshot, SchemaType
+from app.models import GraphQLService, SchemaField, SchemaSnapshot, SchemaType
 from app.schema_collector import CollectedSchema, InvalidIntrospectionResponseError
 from app.schema_parser import parse_sdl
 
@@ -107,6 +107,20 @@ async def test_introspection_persists_snapshot_and_does_not_save_failures(monkey
                         )
                     )
                     assert snapshot_count == 1
+
+                    # A caller may already have uncommitted data in this
+                    # session. Introspection must not roll back that data.
+                    pending_service = GraphQLService(
+                        key="pending-" + uuid.uuid4().hex,
+                        name="Uncommitted service",
+                    )
+                    session.add(pending_service)
+                    await session.flush()
+                    pending_snapshot = await services.import_introspection_schema(
+                        session, pending_service.id, "https://graphql.example.test/graphql"
+                    )
+                    assert pending_snapshot.service_id == pending_service.id
+                    assert await session.get(GraphQLService, pending_service.id) is not None
 
                     failed_service = await services.create_service(
                         session,
