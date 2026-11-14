@@ -218,3 +218,84 @@ async def test_request_cannot_override_target_or_reuse_upstream_cookies(client, 
     assert all("cookie" not in request.headers for request in requests)
     assert all(request.extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"), 30.0)
                for request in requests)
+
+
+@pytest.mark.parametrize("userinfo", [
+    pytest.param("test-user:test-password", id="username-and-password"),
+    pytest.param("test-user", id="username-only"),
+    pytest.param(":test-password", id="password-only"),
+    pytest.param("", id="empty-userinfo"),
+    pytest.param(":", id="empty-username-and-password"),
+    pytest.param("test-user:", id="empty-password"),
+    pytest.param("test%2Duser:test%2Dpassword", id="encoded-credentials"),
+])
+async def test_rejects_target_userinfo_without_request_or_secret_logs(
+    userinfo, client, upstream, monkeypatch, caplog,
+):
+    caplog.set_level(logging.DEBUG)
+    requests = upstream(lambda request: raw_response())
+    target = f"https://{userinfo}@upstream.example/graphql"
+    monkeypatch.setenv("TARGET_GRAPHQL_URL", target)
+
+    response = await client.post("/graphql", content=b"{}", headers={
+        "Authorization": "Bearer test-token", "Cookie": "session=test-cookie",
+    })
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "TARGET_GRAPHQL_URL is not configured correctly"}
+    assert len(requests) == 0
+    # Boolean aggregation avoids printing captured credentials on assertion failure.
+    assert all(value not in caplog.text for value in (
+        target, "test-user", "test-password", "test%2Duser", "test%2Dpassword",
+        "test-token", "test-cookie",
+    ))
+
+
+@pytest.mark.parametrize("casing", ["lower", "upper", "mixed"])
+async def test_strips_client_forwarding_headers_and_preserves_request(casing, client, upstream):
+    spoofed = {
+        "X-Forwarded-For": "203.0.113.99",
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "trusted.example",
+        "X-Forwarded-Port": "443",
+        "X-Forwarded-Prefix": "/admin",
+        "X-Forwarded-Arbitrary-Suffix": "spoofed",
+        "X-Forwarded-": "spoofed",
+        "X-Real-IP": "203.0.113.99",
+        "Forwarded": 'for=203.0.113.99;proto=https;host="trusted.example"',
+    }
+    transform = {"lower": str.lower, "upper": str.upper, "mixed": str.swapcase}[casing]
+    headers = {transform(name): value for name, value in spoofed.items()}
+    headers.update({
+        "Authorization": "Bearer test-token",
+        "Cookie": "session=test-cookie",
+        "Content-Type": "application/json",
+        "Accept": "application/graphql-response+json",
+        "Connection": "X-Private-Hop",
+        "X-Private-Hop": "drop-me",
+        "X-Coverage-Run-Id": "drop-me",
+        "X-Request-Id": "preserved",
+    })
+    body = b'{ "query": "query Test { health }", "variables": {}, "operationName": "Test" }\n'
+    requests = upstream(lambda request: raw_response(headers={"X-Forwarded-Upstream": "preserved"}))
+
+    response = await client.post("/graphql", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.content == b'{"data":{"ok":true}}'
+    assert response.headers["x-forwarded-upstream"] == "preserved"
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == TARGET
+    assert request.content == body
+    assert not any(
+        name.startswith("x-forwarded-") or name in {"forwarded", "x-real-ip"}
+        for name in request.headers
+    )
+    for name in ("connection", "x-private-hop", "x-coverage-run-id"):
+        assert name not in request.headers
+    assert request.headers["authorization"] == "Bearer test-token"
+    assert request.headers["cookie"] == "session=test-cookie"
+    assert request.headers["content-type"] == "application/json"
+    assert request.headers["accept"] == "application/graphql-response+json"
+    assert request.headers["x-request-id"] == "preserved"

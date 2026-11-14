@@ -1,5 +1,7 @@
 """HTTP-only GraphQL proxy; request contents are never parsed or persisted."""
 
+from urllib.parse import urlsplit
+
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
@@ -14,26 +16,32 @@ EXCLUDED_HEADERS = {
 }
 
 
-def forwarded_headers(headers: httpx.Headers) -> list[tuple[bytes, bytes]]:
+def forwarded_headers(headers: httpx.Headers, *, strip_forwarding: bool = False) -> list[tuple[bytes, bytes]]:
     excluded = EXCLUDED_HEADERS | {
         token.strip().lower()
         for value in headers.get_list("connection")
         for token in value.split(",")
     }
+    if strip_forwarding:
+        excluded.update({"forwarded", "x-real-ip"})
+        excluded.update(name.lower() for name in headers if name.lower().startswith("x-forwarded-"))
     return [(name, value) for name, value in headers.raw if name.decode("ascii").lower() not in excluded]
 
 
 @router.post("/graphql")
 async def graphql_proxy(request: Request):
     try:
-        target = httpx.URL(target_graphql_url())
-    except httpx.InvalidURL:
+        target_url = target_graphql_url()
+        target = httpx.URL(target_url)
+        # HTTPX normalizes away empty userinfo; inspect the original authority too.
+        has_userinfo = "@" in urlsplit(target_url).netloc
+    except (httpx.InvalidURL, ValueError):
         raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured correctly") from None
-    if target.scheme not in {"http", "https"} or not target.host:
+    if target.scheme not in {"http", "https"} or not target.host or has_userinfo:
         raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured correctly")
 
     body = await request.body()
-    headers = forwarded_headers(httpx.Headers(request.headers.raw))
+    headers = forwarded_headers(httpx.Headers(request.headers.raw), strip_forwarding=True)
     try:
         # A separate cookie jar per request prevents cross-client session leakage.
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, trust_env=False) as client:
