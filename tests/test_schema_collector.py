@@ -95,3 +95,37 @@ async def test_collect_schema_rejects_non_json_responses():
 
     with pytest.raises(InvalidIntrospectionResponseError, match="invalid JSON"):
         await collect_schema(TARGET_URL, transport=transport)
+
+
+@pytest.mark.parametrize(
+    "untrusted_url",
+    [
+        "https://user:password@graphql.example.test/graphql",
+        "https://user@graphql.example.test/graphql",
+        "https://:password@graphql.example.test/graphql",
+        "https://@graphql.example.test/graphql",
+        "https://user%40name:password@graphql.example.test/graphql",
+        "ftp://graphql.example.test/graphql",
+        "/graphql",
+        "http://",
+        "http://[invalid-ipv6/graphql",
+    ],
+)
+@pytest.mark.asyncio
+async def test_collect_schema_rejects_invalid_or_credentialed_urls_before_request(
+    untrusted_url: str, caplog
+):
+    requests_seen: list[httpx.Request] = []
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        return httpx.Response(200, json=introspection_payload())
+
+    with pytest.raises(SchemaConnectionError, match="URL is invalid"):
+        await collect_schema(
+            untrusted_url,
+            transport=httpx.MockTransport(handle_request),
+        )
+
+    assert requests_seen == []
+    assert "password" not in caplog.text
