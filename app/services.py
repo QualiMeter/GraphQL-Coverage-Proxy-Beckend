@@ -144,11 +144,8 @@ async def import_introspection_schema(
     ``target_url`` must come from application configuration, never from an API
     request body. The HTTP route and configuration are owned by backend #1.
     """
-    if await session.get(GraphQLService, service_id) is None:
-        raise NotFoundError("GraphQL service not found")
-    # Release the read-only lookup transaction while waiting on the upstream API.
-    await session.rollback()
-
+    # Fetch first, before opening a database transaction. Never roll back the
+    # caller's session: it may contain unrelated uncommitted changes.
     collected = await collect_schema(target_url)
     if await session.get(GraphQLService, service_id) is None:
         raise NotFoundError("GraphQL service not found")
