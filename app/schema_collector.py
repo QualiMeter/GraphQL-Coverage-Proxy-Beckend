@@ -50,8 +50,8 @@ async def collect_schema(
     """Fetch introspection from a trusted, application-configured endpoint.
 
     Callers must not pass a URL taken from an untrusted request body. Keeping
-    HTTPX imported lazily lets the base API boot while the runtime dependency
-    change is coordinated with the proxy owner.
+    HTTPX is a runtime dependency and the endpoint must come from trusted
+    application configuration, never from an untrusted request body.
     """
     import httpx
 

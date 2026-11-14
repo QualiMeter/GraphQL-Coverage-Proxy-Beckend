@@ -89,7 +89,10 @@ async def test_introspection_persists_snapshot_and_does_not_save_failures(monkey
                             .where(SchemaType.snapshot_id == snapshot_out.id)
                         )
                     ).all()
-                    fields = {(type_name, field_name): target_id for type_name, field_name, target_id in field_rows}
+                    fields = {
+                        (type_name, field_name): target_id
+                        for type_name, field_name, target_id in field_rows
+                    }
                     assert ("Query", "users") in fields
                     assert fields[("Query", "users")] is not None
                     assert ("User", "name") in fields
