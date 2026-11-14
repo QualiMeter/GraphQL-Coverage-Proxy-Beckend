@@ -16,6 +16,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="GraphQL Coverage API", version="0.1.0", lifespan=lifespan)
+# Install the real async Analyzer at application composition/startup time.
+# Missing configuration disables only requests opting into E2E capture.
+app.state.coverage_analyzer = None
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins(), allow_methods=["*"], allow_headers=["*"])
 app.include_router(router)
 app.include_router(proxy_router)
