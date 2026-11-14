@@ -10,6 +10,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access import require_admin
 from app.config import target_graphql_url
 from app.database import SessionFactory
 from app.e2e_capture import capture_e2e_exchange, load_run_snapshot
@@ -20,7 +21,7 @@ router = APIRouter(tags=["GraphQL Proxy"])
 EXCLUDED_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
-    "host", "content-length", "x-coverage-run-id",
+    "host", "content-length", "x-coverage-run-id", "x-coverage-api-key",
 }
 MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024
 
@@ -88,7 +89,7 @@ def forwarded_headers(headers: httpx.Headers, *, strip_forwarding: bool = False)
     return [(name, value) for name, value in headers.raw if name.decode("ascii").lower() not in excluded]
 
 
-@router.post("/graphql")
+@router.post("/graphql", dependencies=[Depends(require_admin)])
 async def graphql_proxy(request: Request, session: AsyncSession | None = Depends(get_proxy_session)):
     run_id = coverage_run_id(request)
     analyzer = None

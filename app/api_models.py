@@ -15,12 +15,19 @@ class ApiModel(BaseModel):
 class ServiceCreate(ApiModel):
     key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z][a-z0-9_-]*$")
     name: str = Field(min_length=1, max_length=255)
+    is_public: bool = False
+
+
+class ServiceVisibilityUpdate(ApiModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+    is_public: bool
 
 
 class ServiceOut(ApiModel):
     id: uuid.UUID
     key: str
     name: str
+    is_public: bool
     created_at: datetime
 
 

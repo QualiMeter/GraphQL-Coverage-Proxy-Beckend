@@ -8,6 +8,7 @@ from app.main import app
 
 
 TARGET = "https://upstream.example/api/graphql?tenant=demo"
+TEST_ADMIN_KEY = "test-only-coverage-admin-key-" + "a" * 40
 
 
 @pytest.fixture
@@ -30,9 +31,11 @@ def upstream(monkeypatch):
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
+    monkeypatch.setenv("COVERAGE_API_KEY", TEST_ADMIN_KEY)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://proxy.example",
+        headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY},
     ) as client:
         yield client
 
@@ -84,6 +87,7 @@ async def test_forwards_original_body_and_applicable_headers(operation, client, 
     for name in (
         "connection", "x-private-hop", "proxy-authorization", "keep-alive", "te",
         "trailer", "transfer-encoding", "upgrade", "proxy-connection", "x-coverage-run-id",
+        "x-coverage-api-key",
     ):
         assert name not in request.headers
     for secret in (operation, "private-variable", "private-token", "private-cookie", "private-proxy-token"):

@@ -20,6 +20,12 @@ from app.services import NotFoundError
 SERVICE_ID = uuid.uuid4()
 TARGET_URL = "https://graphql.example.test/graphql"
 ROUTE = "/api/schemas/import/introspection"
+TEST_ADMIN_KEY = "test-only-coverage-admin-key-" + "a" * 40
+
+
+@pytest.fixture(autouse=True)
+def configured_admin_key(monkeypatch):
+    monkeypatch.setenv("COVERAGE_API_KEY", TEST_ADMIN_KEY)
 
 
 def test_introspection_route_uses_config_only_and_returns_snapshot(monkeypatch):
@@ -38,7 +44,7 @@ def test_introspection_route_uses_config_only_and_returns_snapshot(monkeypatch):
 
     monkeypatch.setattr(api, "import_introspection_schema", fake_import)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
         response = client.post(ROUTE, json={"serviceId": str(SERVICE_ID)})
         injected_url = client.post(
             ROUTE,
@@ -61,7 +67,7 @@ def test_introspection_route_requires_configured_target(monkeypatch):
         pytest.fail("Collector must not run without a configured endpoint")
 
     monkeypatch.setattr(api, "import_introspection_schema", should_not_run)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
         response = client.post(ROUTE, json={"serviceId": str(SERVICE_ID)})
 
     assert response.status_code == 503
@@ -98,7 +104,7 @@ def test_introspection_route_sanitizes_failures(
         raise failure
 
     monkeypatch.setattr(api, "import_introspection_schema", fake_import)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
         response = client.post(ROUTE, json={"serviceId": str(SERVICE_ID)})
 
     assert response.status_code == expected_status
