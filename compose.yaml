@@ -20,6 +20,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://coverage:coverage_dev@db:5432/coverage
       CORS_ORIGINS: http://localhost:5173
+      TARGET_GRAPHQL_URL: ${TARGET_GRAPHQL_URL:-}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
