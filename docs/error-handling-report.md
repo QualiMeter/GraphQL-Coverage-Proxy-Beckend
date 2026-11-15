@@ -274,3 +274,91 @@ PR #30 не обещает классификацию всех варианто�
 Модели БД, миграции, ACL/CSRF/SSRF, транзакции, публичные контракты, Nginx,
 Compose, deployment scripts и GitHub Variables/Secrets не менялись.
 Merge, production deployment и подключения к production не выполнялись.
+
+## Исправление P2/B2: завершение процесса с заблокированным sink
+
+База повторного ревью — `128974cf73a5d2c0ceb1128808c3ee1bb5504f7f`.
+B1 подтверждён исправленным; этот follow-up устраняет только новый B2 в PR #30.
+
+### Root cause и жизненный цикл
+
+`logging.Handler.handle()` держал handler lock на протяжении emit, включая
+потенциально бесконечные stderr.write/flush в daemon consumer. На выходе Python
+автоматически вызывает `logging.shutdown()`, который захватывает тот же lock и
+вызывает flush. Поэтому daemon=True не обеспечивал выход процесса даже после
+успешного ASGI lifespan shutdown и возврата Uvicorn.
+
+Сохранены один consumer и очередь на 128 событий. Только этот consumer пишет
+через приватный `_SafeStreamHandler`; его `createLock()` теперь устанавливает
+lock=None. Shutdown-метод handler.flush() не выполняет I/O. Consumer сам вызывает
+write и flush в emit, с прежним silent best-effort catch. Унаследованный
+StreamHandler/Handler.close выполняет bookkeeping, не flush/close потока.
+Никаких join, новых shutdown hooks, os._exit или глобальных logging-подмен нет.
+
+Handler владеет отдельным Python text buffer поверх stderr fd 2 с
+closefd=False. Это позволяет писать прежний JSON в тот же production stderr,
+не удерживая buffer lock глобального sys.stderr при блокировке consumer.
+Сам fd 2 не закрывается handler. Если stderr недоступен при создании буфера,
+события отбрасываются без fallback. Только один consumer обращается к буферу,
+поэтому handler lock не нужен для сериализации. Буфер не добавляет потоков,
+очередей или неограниченного накопления. При зависшем I/O события остаются
+ограничены размером очереди и могут теряться; завершение не ждёт их доставки.
+
+Защита B1 сохранена: безопасные JSON/LogRecord.diagnostic, allowlist метаданных,
+защищённый SQLSTATE accessor, отсутствие original exception/context в очереди,
+propagate=False, silent handleError и никаких изменений logging.raiseExceptions.
+Авторизация, ACL/CSRF/SSRF, транзакции и запрет mutation retry не менялись.
+
+### Red/green и реальные shutdown tests
+
+Добавлен `tests/test_diagnostics_shutdown.py`: **6 cases** — none/write/flush
+для отдельного Python subprocess и локального Uvicorn с production
+server_config. Uvicorn Config создаётся до импорта app.main, как в production:
+иной порядок может удалить handler из logging shutdown registry и скрыть B2.
+
+На неизменённом `128974c`: **4 failed, 2 passed**, 50.34 s. Все четыре случая
+заблокированного sink зависли после MAIN_RETURNED; Uvicorn-варианты также
+подтвердили ASGI_LIFESPAN_STOPPED и UVICORN_STOPPED. Обычный выход проходил.
+12-секундный watchdog убил и reap-нул каждый зависший дочерний процесс.
+Тесты не оставили зависших Python/Uvicorn процессов.
+
+После исправления те же subprocess проходят с exit code 0 без kill/watchdog.
+Uvicorn обслуживает реальный HTTP /health при заблокированной диагностике,
+завершает реальный lifespan приложения (включая engine.dispose), останавливает
+listeners по server.should_exit, возвращает serve и действительно выходит из
+Python. Тест проверяет stdout markers, returncode и отсутствие SQL/parameter/
+exception-token canaries в stdout/stderr. Глобальный process stderr перед выходом
+восстанавливается: навсегда заблокирован именно diagnostic sink, а не чужие
+Uvicorn handlers или стандартные потоки процесса в целом.
+
+Дополнительный smoke с реально заполненным OS pipe и незавершённым write
+consumer также завершился с exit code 0 после возврата main.
+
+Целевой run B2 + B1 + прежняя diagnostics/privacy: **67 passed**, 13.70 s.
+С graphql-core 3.2.14, включая schema parser: **72 passed**, 12.75 s.
+Прежние 15 B1 cases сохранены. Их stderr capture изменён на capfd: новый
+приватный буфер пишет в fd 2, и тест теперь проверяет фактический descriptor
+output, а не только подменённый Python sys.stderr. Privacy assertions не удалены.
+
+### Файлы и проверки
+
+Изменены только `app/diagnostics.py`, `tests/test_diagnostics_best_effort.py`,
+новый `tests/test_diagnostics_shutdown.py` и этот отчёт. `tests/conftest.py`
+и остальные проверки не менялись. Полный локальный run с Python 3.12 и
+PostgreSQL 16 использует две новые localhost БД shutdown_app/shutdown_tests:
+**629 passed, 0 skipped**, 241.65 s (401 unit/security + 228 integration).
+Единственное warning — прежнее Starlette/httpx deprecation.
+CI run/commit SHA фиксируются в PR description и итоговом сообщении. pip check, compileall изменённых Python-файлов и diff whitespace
+check проходят. Локальный Docker daemon остаётся недоступен; Docker smoke
+подтверждается только фактическим GitHub Actions на итоговом HEAD.
+
+### Ограничения
+
+Доставка остаётся best effort без гарантии flush на выходе. Проверены текущая
+production-конфигурация Uvicorn и стандартный diagnostic handler. Сторонняя
+замена private logger/handlers, pre-fork hosts и зависания чужих logging paths
+не исправляются глобально; такие конфигурации не вводились и не проверялись.
+Production fault injection/restart/deployment не выполнялись.
+Старый SDL input-in-output TypeError graphql-core 3.2.14 и GraphQL error details
+для PR #31 остаются вне текущего исправления. DB models/migrations, Compose,
+Nginx, deployment scripts, GitHub Variables/Secrets не менялись.

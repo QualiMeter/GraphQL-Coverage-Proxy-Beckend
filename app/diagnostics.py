@@ -4,7 +4,6 @@ import json
 import logging
 import queue
 import re
-import sys
 import threading
 import uuid
 from contextlib import contextmanager
@@ -14,16 +13,36 @@ from sqlalchemy.exc import DBAPIError
 
 
 class _SafeStreamHandler(logging.StreamHandler):
+    # Only the single diagnostic consumer performs I/O. No handler lock or sink
+    # flush may make logging.shutdown wait for that daemon's blocked write/flush.
+    def createLock(self):
+        self.lock = None
+
+    def __init__(self):
+        super().__init__()
+        try:
+            # Own the Python buffer, borrow fd 2. A blocked diagnostic write must
+            # not hold sys.stderr's buffer lock during interpreter finalization.
+            self.stream = open(2, "w", buffering=1, encoding="utf-8",
+                               errors="backslashreplace", closefd=False)
+        except OSError:
+            self.stream = None  # No usable stderr; drop events without fallback.
+
+    def flush(self):
+        # logging.shutdown calls this on the main thread. Consumer flushes below.
+        pass
+
     def emit(self, record):
         try:
-            self.stream = sys.stderr
-            super().emit(record)
+            stream = self.stream
+            if stream is not None:
+                stream.write(self.format(record) + self.terminator)
+                stream.flush()
         except Exception:
             pass  # No fallback output, including when emit itself fails.
 
     def handleError(self, record):
-        # StreamHandler catches formatter/write/flush errors internally. Its
-        # default handleError can print a chained exception even without exc_info.
+        # Never use the default traceback fallback, even if called explicitly.
         pass
 
 

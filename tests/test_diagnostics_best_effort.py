@@ -37,8 +37,9 @@ def attached_handler():
         diagnostics.logger.removeHandler(handler)
 
 
-def private_output_is_absent(response, caplog, capsys):
-    output = caplog.text + capsys.readouterr().err
+def private_output_is_absent(response, caplog, capfd):
+    # The owned stderr buffer writes to fd 2: capture the actual descriptor.
+    output = caplog.text + capfd.readouterr().err
     # Successful proxy responses intentionally retain upstream bodies verbatim.
     # Error responses must additionally be free of every canary.
     if response.status_code >= 400:
@@ -48,7 +49,7 @@ def private_output_is_absent(response, caplog, capsys):
 
 
 async def test_b1_handler_oserror_preserves_http_502_and_no_retry(
-    client, upstream, capture_context, attached_handler, caplog, capsys,
+    client, upstream, capture_context, attached_handler, caplog, capfd,
 ):
     attached_handler(BrokenHandler())
     capture_context.capture.side_effect = storage_failure()
@@ -60,7 +61,7 @@ async def test_b1_handler_oserror_preserves_http_502_and_no_retry(
     assert result.status_code == 502
     assert result.json() == WARNING
     assert len(requests) == 1
-    private_output_is_absent(result, caplog, capsys)
+    private_output_is_absent(result, caplog, capfd)
 
 
 class BrokenSQLState(Exception):
@@ -70,7 +71,7 @@ class BrokenSQLState(Exception):
 
 
 async def test_bad_sqlstate_accessor_preserves_http_502(
-    client, upstream, capture_context, caplog, capsys,
+    client, upstream, capture_context, caplog, capfd,
 ):
     capture_context.capture.side_effect = DBAPIError('INSERT secret SQL',
         {'password': 'password-secret'}, BrokenSQLState(' '.join(SECRETS)))
@@ -83,12 +84,12 @@ async def test_bad_sqlstate_accessor_preserves_http_502(
     records = [r.diagnostic for r in caplog.records if hasattr(r, 'diagnostic')]
     assert records == [{'event': 'coverage_internal_failure', 'stage': 'observation_save',
                        'exception_type': 'DBAPIError', 'run_id': str(capture_context.run.id)}]
-    private_output_is_absent(result, caplog, capsys)
+    private_output_is_absent(result, caplog, capfd)
 
 
 @pytest.mark.parametrize('fault', ['formatter', 'stream', 'stderr'])
 async def test_handleerror_never_prints_original_exception_context(
-    fault, client, upstream, capture_context, attached_handler, monkeypatch, caplog, capsys,
+    fault, client, upstream, capture_context, attached_handler, monkeypatch, caplog, capfd,
 ):
     monkeypatch.setattr(logging, 'raiseExceptions', True)
     target = next((h for h in diagnostics.logger.handlers if isinstance(h, logging.StreamHandler)
@@ -122,12 +123,12 @@ async def test_handleerror_never_prints_original_exception_context(
     result = await client.post('/graphql', json=BODY, headers=wire_headers(capture_context.run.id))
     assert result.status_code == 502 and result.json() == WARNING
     assert len(requests) == 1
-    private_output_is_absent(result, caplog, capsys)
+    private_output_is_absent(result, caplog, capfd)
 
 
 @pytest.mark.parametrize('point', ['preflight', 'timeout', 'sdl_storage', 'introspection_storage', 'analyzer', 'document'])
 async def test_failed_diagnostic_sink_preserves_other_public_contracts(
-    point, client, upstream, capture_context, attached_handler, monkeypatch, caplog, capsys,
+    point, client, upstream, capture_context, attached_handler, monkeypatch, caplog, capfd,
 ):
     from app import api
     attached_handler(BrokenHandler())
@@ -177,11 +178,11 @@ async def test_failed_diagnostic_sink_preserves_other_public_contracts(
             assert observation.analysis.status == ('internal_error' if point == 'analyzer' else 'success')
             if point == 'document':
                 assert observation.safe_document.text is None
-    private_output_is_absent(result, caplog, capsys)
+    private_output_is_absent(result, caplog, capfd)
 
 
 async def test_enqueue_failure_is_best_effort_at_http_boundary(
-    client, upstream, capture_context, monkeypatch, caplog, capsys,
+    client, upstream, capture_context, monkeypatch, caplog, capfd,
 ):
     def broken(*args):
         raise OSError('queue unavailable')
@@ -191,11 +192,11 @@ async def test_enqueue_failure_is_best_effort_at_http_boundary(
     result = await client.post('/graphql', json=BODY, headers=wire_headers(capture_context.run.id))
     assert result.status_code == 502 and result.json() == WARNING
     assert len(requests) == 1
-    private_output_is_absent(result, caplog, capsys)
+    private_output_is_absent(result, caplog, capfd)
 
 
 async def test_blocked_sink_and_full_queue_never_hold_event_loop_or_retry(
-    client, upstream, capture_context, attached_handler, caplog, capsys,
+    client, upstream, capture_context, attached_handler, caplog, capfd,
 ):
     from conftest import drain_diagnostics
     loop_thread = threading.get_ident()
@@ -228,11 +229,11 @@ async def test_blocked_sink_and_full_queue_never_hold_event_loop_or_retry(
     finally:
         release.set()
         await asyncio.to_thread(drain_diagnostics)
-    private_output_is_absent(results[1], caplog, capsys)
+    private_output_is_absent(results[1], caplog, capfd)
 
 
 async def test_concurrent_http_failures_keep_context_and_cancellation_is_not_logged(
-    client, upstream, capture_context, monkeypatch, caplog, capsys,
+    client, upstream, capture_context, monkeypatch, caplog, capfd,
 ):
     from app.models import TestRun as Run
     monkeypatch.setattr(proxy, 'capture_e2e_exchange', e2e_capture.capture_e2e_exchange)
@@ -283,7 +284,7 @@ async def test_concurrent_http_failures_keep_context_and_cancellation_is_not_log
         assert save.await_count == len(run_ids)
         assert len(requests) == len(run_ids) + 1
         assert diagnostics._run_id.get() is None
-        private_output_is_absent(results[0], caplog, capsys)
+        private_output_is_absent(results[0], caplog, capfd)
     finally:
         release.set()
         for task in tasks:
