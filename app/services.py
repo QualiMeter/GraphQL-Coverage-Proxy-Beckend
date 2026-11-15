@@ -106,7 +106,10 @@ async def list_services(session: AsyncSession, *, public_only: bool = False, use
             for row, granted in rows]
 
 
-async def update_service(session: AsyncSession, service_id: uuid.UUID, changes: dict) -> ServiceOut:
+async def update_service(
+    session: AsyncSession, service_id: uuid.UUID, changes: dict,
+    *, authorize: Callable[[AsyncSession], Awaitable[None]] | None = None,
+) -> ServiceOut:
     # All run creation and endpoint updates lock the same service row. This is
     # necessary even when the active run belongs to a different snapshot.
     row = await session.scalar(
@@ -115,6 +118,8 @@ async def update_service(session: AsyncSession, service_id: uuid.UUID, changes: 
     )
     if row is None:
         raise NotFoundError("GraphQL service not found")
+    if authorize is not None:
+        await authorize(session)
     if "endpoint_url" in changes and changes["endpoint_url"] != row.endpoint_url:
         active = await session.scalar(select(TestRun.id).join(
             SchemaSnapshot, SchemaSnapshot.id == TestRun.snapshot_id,

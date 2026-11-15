@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.contracts import AnalysisResult, FieldReference, RequestObservationInput
 from app.analyzer_adapter import analyze_e2e_query
-from app.database import get_session
+from app.database import get_session, get_session_factory
 from app.main import app
 from app.e2e_capture import capture_e2e_exchange
 from app.models import ObservedRequest
@@ -175,6 +176,9 @@ async def test_analytics_visibility_http_filters_and_existing_protection(postgre
         yield postgres_session
 
     app.dependency_overrides[get_session] = session_override
+    sessions = async_sessionmaker(bind=postgres_session.bind, expire_on_commit=False,
+                                 join_transaction_mode="create_savepoint")
+    app.dependency_overrides[get_session_factory] = lambda: sessions
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             headers = {"X-Coverage-Api-Key": TEST_KEY}
@@ -206,6 +210,7 @@ async def test_analytics_visibility_http_filters_and_existing_protection(postgre
             for endpoint in ("operations", "stats"):
                 assert (await client.get(f"/api/runs/{run.id}/{endpoint}")).status_code == 404
     finally:
+        app.dependency_overrides.pop(get_session_factory, None)
         app.dependency_overrides.pop(get_session, None)
 
 

@@ -100,3 +100,66 @@ DDL требует блокировки таблицы, поэтому окно 
 не подтверждён из-за недоступного daemon; итог CI указан в PR.
 Merge, deploy, включение `ENABLE_PRODUCTION_DEPLOY` и обращения к production БД
 не выполнялись. Отложенные P2-функции и история этапов 1–5 не изменены.
+
+## Доработка PR #28 после независимого ревью: DNS сервисных маршрутов
+
+База доработки: `ce81f36f85ecf5bfade75798df369fdad9541200`.
+Ревью подтвердило три первоначальных исправления и выявило существовавшее
+ранее удержание PostgreSQL connections при DNS в POST/PATCH сервисов.
+
+`post_service` и `patch_service` теперь получают session factory, а их cookie
+authentication использует существующую короткую `introspection_principal`.
+POST проверяет роль/Origin/CSRF до DNS; PATCH дополнительно проверяет ACL в
+короткой read session. Все эти contexts закрыты до `validate_endpoint`.
+DNS и проверка всех полученных IP остаются прежними и выполняются без checkout.
+
+После DNS новая session повторно вызывает `current_principal` и `require_operator`.
+POST создаёт сервис и owner grant с актуальным principal в одной транзакции.
+PATCH передаёт callback авторизации в `update_service`: он выполняется **после
+получения `FOR UPDATE`**, перед проверкой активных runs и изменением любых полей.
+Поэтому отзыв grant/сессии/роли во время DNS или ожидания service lock не
+разрешает запись. Недоступный сервис по-прежнему даёт 404; активный run блокирует
+смену endpoint с 409. Создание run и обновление endpoint сохраняют общий service lock.
+PATCH без endpoint не вызывает DNS; повторное сохранение того же endpoint
+допускается при активном run, как и раньше. Общая `current_principal` в
+`app/auth.py`, размеры пула, pool timeout и SSRF-политика не менялись.
+
+Изменённые файлы этой доработки:
+
+- `app/api.py`: отдельные фазы сервисных writes и повторная авторизация.
+- `app/services.py`: callback авторизации после блокировки в `update_service`.
+- `tests/test_service_dns_transactions_postgres.py`: 20 новых regression cases.
+- `tests/test_access_control_postgres.py`, `tests/test_run_analytics_postgres.py`:
+  factory override для новых сессий на существующем rollback-only connection;
+  прежние проверки не ослаблены.
+- `README.md`, этот отчёт: фактическое поведение и результаты.
+
+Новые тесты используют настоящий login, cookie, hashed session и CSRF, реальный
+изолированный PostgreSQL и **неизменённые defaults SQLAlchemy: 5 + 10, timeout 30 с**.
+Контролируемый Event приостанавливает только resolver; production
+`validate_endpoint` проверяет URL и каждый возвращённый IP.
+
+Три обязательных stress-сценария — POST cookie, PATCH CLI, PATCH cookie —
+проверяют 15 одновременных DNS waits, `checkedout() == 0`, независимый GET,
+отсутствие изменений до DNS release и сохранность всех writes/owner grants после.
+Дополнительно проверены отзыв grant и сессии, смена роли, отключение пользователя,
+старт run до записи, удаление сервиса, приоритет ACL над конфликтом run,
+отмена DNS-запроса, смешанный public/private DNS answer, ошибка commit после
+flush, отсутствие частичных service/grant writes, повторный ключ и PATCH без
+смены endpoint. Отдельный тест отзывает grant, пока PATCH ожидает service lock.
+Проверки читают фактические строки и JSON PostgreSQL.
+
+На исходном HEAD все 3 stress-теста воспроизводят дефект: **15 checkouts во время
+DNS**. После исправления новые тесты: **20 passed**; целевая проверка вместе со
+старыми ACL/analytics tests: **30 passed**. Финальный полный pytest: **543 passed,
+без skip** (332 unit, 211 PostgreSQL integration); в полный набор входят все 21
+прежних регрессии этапа 6. Результат CI на новом HEAD указан в описании PR.
+`alembic upgrade head` и `alembic check` проходят,
+schema drift отсутствует; новых миграций нет. `pip check`, Compose config,
+синтаксис deploy-скрипта и `git diff --check` проходят.
+
+Остаётся обычная семантика конкурентных коротких транзакций: запись проверяет
+права в момент финальной авторизации под service lock. Изменение grants после
+этой проверки не отменяет уже разрешённую транзакцию задним числом. При отмене
+во время DNS запись ещё не начиналась. Merge/deploy не выполнялись; Docker/Nginx
+smoke и окончательные результаты GitHub CI фиксируются в описании PR.

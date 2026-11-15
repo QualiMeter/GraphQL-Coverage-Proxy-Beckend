@@ -4,8 +4,9 @@ import uuid
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.database import get_session
+from app.database import get_session, get_session_factory
 from app.main import app
 from app.services import create_run, create_service, import_sdl
 from test_postgres_integration import postgres_session  # noqa: F401
@@ -33,6 +34,9 @@ async def test_private_is_default_and_nested_reads_cannot_bypass_visibility(
         yield session
 
     app.dependency_overrides[get_session] = session_override
+    sessions = async_sessionmaker(bind=session.bind, expire_on_commit=False,
+                                 join_transaction_mode="create_savepoint")
+    app.dependency_overrides[get_session_factory] = lambda: sessions
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -91,5 +95,6 @@ async def test_private_is_default_and_nested_reads_cannot_bypass_visibility(
             assert (await client.get("/api/services")).json() == []
             assert (await client.get(f"/api/runs/{public_run.id}/coverage")).status_code == 404
     finally:
+        app.dependency_overrides.pop(get_session_factory, None)
         app.dependency_overrides.pop(get_session, None)
 
