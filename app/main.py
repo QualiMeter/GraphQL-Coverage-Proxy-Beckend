@@ -41,7 +41,7 @@ async def health():
 async def safe_validation_error(request: Request, exc: RequestValidationError):
     if (route_path(request.scope).startswith("/api/auth/")
             or route_path(request.scope).startswith("/api/services")
-            or route_path(request.scope) == "/api/schemas/import/introspection"):
+            or route_path(request.scope).startswith("/api/schemas")):
         # Pydantic's default error input can echo a submitted password or body.
         return JSONResponse(status_code=422, content={"detail": [
             {key: error[key] for key in ("type", "loc", "msg")} for error in exc.errors()

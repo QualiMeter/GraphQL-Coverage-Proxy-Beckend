@@ -22,15 +22,18 @@ class AuthBoundaryMiddleware:
         is_auth = path.startswith("/api/auth/")
         is_service_write = path.startswith("/api/services") and scope["method"] in {"POST", "PATCH"}
         is_introspection = path == "/api/schemas/import/introspection" and scope["method"] == "POST"
-        if is_auth or is_service_write or is_introspection:
+        is_sdl = path == "/api/schemas/import" and scope["method"] == "POST"
+        is_schema_write = path.startswith("/api/schemas/") and scope["method"] == "PATCH"
+        if is_auth or is_service_write or is_introspection or is_sdl or is_schema_write:
+            body_limit = 1_048_576 if is_sdl else 16_384
             body = bytearray()
             while True:
                 message = await receive()
                 if message["type"] == "http.disconnect":
                     return
                 body.extend(message.get("body", b""))
-                if len(body) > 16_384:
-                    response = JSONResponse({"detail": "Authentication payload too large" if is_auth else "Schema import payload too large" if is_introspection else "Service payload too large"}, status_code=413,
+                if len(body) > body_limit:
+                    response = JSONResponse({"detail": "Authentication payload too large" if is_auth else "Schema import payload too large" if is_introspection or is_sdl else "Schema payload too large" if is_schema_write else "Service payload too large"}, status_code=413,
                                             headers={"Cache-Control": "no-store"})
                     return await response(scope, receive, send)
                 if not message.get("more_body", False):

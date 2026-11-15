@@ -125,7 +125,8 @@ decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
 - Поддерживается одиночный JSON GraphQL-запрос, включая `operationName` и
   `variables`. Неподдерживаемая форма сохраняется как `unsupported` без покрытия.
 - В PostgreSQL сохраняются только метаданные, хеш текста операции, статусы
-  анализа и ссылки на поля из схемы. Ни query, ни variables, ни ответы не сохраняются.
+  анализа, ссылки на поля и только masked AST copy. Исходные query, variables
+  и ответы не сохраняются. Безопасная копия реально выполненного document выдаётся в защищённом request detail.
 - Признаки GraphQL-ответа вычисляются по **декодированной копии JSON**.
   Для анализа gzip/deflate распаковываются с пределом 1 МиБ, непроверяемый ответ
   даёт `None`. Клиент получает исходные сжатые байты ответа; в БД они не сохраняются.
@@ -260,7 +261,9 @@ REST API предоставляет агрегаты существующих н
 самостоятельной регистрации нет. Не передавайте `COVERAGE_API_KEY` в браузер.
 История по сервису, фильтры журнала и request detail реализованы в этапе 4;
 [frontend-контракт, total/pagination/ACL и миграция](docs/frontend-history-requests.md).
-P95/analysisStatusCounts и безопасный AST-документ — следующие P0/P1;
+Этап 5 добавляет P95/analysisStatusCounts, masked AST реального документа,
+SDL и метаданные схемы, displayName. [Контракт frontend](docs/frontend-final-features.md),
+[миграция и будущий release](deploy/STAGE5-RELEASE.md).
 сравнение прогонов — P2, позже.
 
 ## Тесты

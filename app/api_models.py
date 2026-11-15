@@ -2,12 +2,13 @@
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 from app.contracts import OperationType
+from app.safe_document import DocumentAvailability
 
 
 class ApiModel(BaseModel):
@@ -65,7 +66,27 @@ class SchemaImportErrorOut(ApiModel):
     code: str = Field(description="Stable introspection error code; no upstream text, URL or credentials.")
 
 
+class SchemaUpdate(ApiModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+    display_name: str | None = Field(max_length=255)
+
+    @model_validator(mode="after")
+    def clean_label(self):
+        if self.display_name is not None:
+            self.display_name = self.display_name.strip()
+            if not self.display_name:
+                raise ValueError("displayName must not be blank")
+        return self
+
+
+class SchemaSdlOut(ApiModel):
+    schema_id: uuid.UUID
+    schema_hash: str
+    sdl: str
+
+
 class SchemaOut(ApiModel):
+    display_name: str | None = None
     id: uuid.UUID
     service_id: uuid.UUID
     schema_hash: str
@@ -89,7 +110,25 @@ class RunOut(ApiModel):
     metadata: dict[str, Any]
 
 
+class SchemaArgumentOut(ApiModel):
+    name: str
+    type: str
+    description: str | None = None
+    default_value: str | None = Field(default=None, description="Masked AST representation, never the actual schema argument default.")
+    default_value_availability: Literal["absent", "available", "redacted", "unavailable"] = "absent"
+
+
+class RootTypesOut(ApiModel):
+    query: str | None = None
+    mutation: str | None = None
+    subscription: str | None = None
+
+
 class GraphField(ApiModel):
+    description: str | None = None
+    deprecation_reason: str | None = None
+    args: list[SchemaArgumentOut] = Field(default_factory=list)
+
     name: str
     return_type: str
     target_type: str | None
@@ -99,6 +138,11 @@ class GraphField(ApiModel):
 
 
 class GraphType(ApiModel):
+    description: str | None = None
+    root_operations: list[OperationType] = Field(default_factory=list)
+    interfaces: list[str] = Field(default_factory=list)
+    possible_types: list[str] = Field(default_factory=list)
+
     name: str
     kind: str
     total_fields: int
@@ -108,6 +152,8 @@ class GraphType(ApiModel):
 
 
 class GraphRelation(ApiModel):
+    id: uuid.UUID = Field(description="Deterministic UUIDv5 of snapshot ID and [fromType, field, toType].")
+
     from_type: str
     field: str
     to_type: str
@@ -121,6 +167,8 @@ class CoverageSummary(ApiModel):
 
 
 class CoverageGraph(ApiModel):
+    root_types: RootTypesOut = Field(default_factory=RootTypesOut)
+
     schema_id: uuid.UUID
     run_id: uuid.UUID | None
     summary: CoverageSummary
@@ -151,6 +199,9 @@ class SelectedFieldOut(ApiModel):
 
 
 class RequestDetailOut(RequestOut):
+    safe_graphql_document: str | None = Field(default=None, description="Normalized AST of the actual wire document, literals masked; never an executable replay or selectedFields reconstruction.")
+    document_availability: DocumentAvailability = "unavailable"
+
     counted_in_coverage: bool
     selected_fields: list[SelectedFieldOut]
 
@@ -183,7 +234,18 @@ class RequestTimelineBucket(ApiModel):
     avg_duration_ms: float | None
 
 
+class AnalysisStatusCounts(ApiModel):
+    success: int
+    parse_error: int
+    validation_error: int
+    unsupported: int
+    internal_error: int
+
+
 class RunStats(CoverageSummary):
+    analysis_status_counts: AnalysisStatusCounts
+    p95_duration_ms: float | None = Field(description="PostgreSQL percentile_cont(0.95) over this run's non-null durations; null for no measurements.")
+
     total_requests: int
     counted_requests: int
     unique_operations: int = Field(description="Groups with known query_hash and operation_type, including anonymous operations.")

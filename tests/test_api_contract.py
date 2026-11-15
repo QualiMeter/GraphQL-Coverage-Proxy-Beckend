@@ -70,3 +70,33 @@ def test_history_journal_openapi_typed_filters_and_detail():
     assert detail['responses']['200']['content']['application/json']['schema']['$ref'].endswith('/RequestDetailOut')
     assert 'operationKey' in schema['components']['schemas']['RequestOut']['properties']
     assert {'countedInCoverage','selectedFields'} <= schema['components']['schemas']['RequestDetailOut']['properties'].keys()
+
+
+def test_stage5_openapi_preserves_safe_schema_and_request_contracts():
+    schema = app.openapi()
+    paths = schema['paths']
+    assert paths['/api/schemas/{schema_id}/sdl']['get']['responses']['200']['content']['application/json']['schema']['$ref'].endswith('/SchemaSdlOut')
+    assert 'security' not in paths['/api/schemas/{schema_id}/sdl']['get']
+    assert paths['/api/schemas/{schema_id}']['patch']['security']
+    models = schema['components']['schemas']
+    assert set(models['AnalysisStatusCounts']['properties']) == {'success','parseError','validationError','unsupported','internalError'}
+    assert {'analysisStatusCounts','p95DurationMs'} <= models['RunStats']['properties'].keys()
+    assert {'safeGraphqlDocument','documentAvailability'} <= models['RequestDetailOut']['properties'].keys()
+    assert 'safeGraphqlDocument' not in models['RequestOut']['properties']
+    assert 'safeGraphqlDocument' not in models['OperationOut']['properties']
+    assert models['RequestDetailOut']['properties']['documentAvailability']['enum'] == ['available','redacted','unavailable']
+    assert {'description','deprecationReason','args'} <= models['GraphField']['properties'].keys()
+    assert {'rootOperations','interfaces','possibleTypes','description'} <= models['GraphType']['properties'].keys()
+    assert models['GraphRelation']['properties']['id']['format'] == 'uuid'
+    assert models['SchemaUpdate']['additionalProperties'] is False
+    assert 'displayName' in models['SchemaOut']['properties']
+
+
+def test_schema_payload_limits_and_validation_never_echo_source(monkeypatch):
+    from test_graphql_proxy import TEST_ADMIN_KEY
+    monkeypatch.setenv('COVERAGE_API_KEY',TEST_ADMIN_KEY)
+    with TestClient(app,headers={'X-Coverage-Api-Key':TEST_ADMIN_KEY}) as client:
+        assert client.post('/api/schemas/import',content=b'x'*1_048_577).status_code==413
+        assert client.patch('/api/schemas/00000000-0000-0000-0000-000000000001',content=b'x'*16_385).status_code==413
+        response=client.post('/api/schemas/import',json={'serviceId':'bad','sdl':'secret-schema-source'})
+        assert response.status_code==422 and 'secret-schema-source' not in response.text

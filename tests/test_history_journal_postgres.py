@@ -239,7 +239,8 @@ async def test_detail_counting_snapshot_identity_missing_and_no_secrets(journal_
         row = (await client.get(f'{path}/{ident}')).json()
         assert row['countedInCoverage'] == (row['analysisStatus'] == 'success' and row['responseHasData'] is True)
         total += row['countedInCoverage']
-        assert not {'query', 'variables', 'cookies', 'responseBody', 'queryHash', 'safeGraphqlDocument'} & row.keys()
+        assert row['safeGraphqlDocument'] is None and row['documentAvailability'] == 'unavailable'
+        assert not {'query', 'variables', 'cookies', 'responseBody', 'queryHash'} & row.keys()
     assert total == (await get_run_stats(postgres_session, run.id)).counted_requests
     empty = (await client.get(f'{path}/{d}')).json()
     assert empty['selectedFields'] == [] and empty['operationKey'] is None

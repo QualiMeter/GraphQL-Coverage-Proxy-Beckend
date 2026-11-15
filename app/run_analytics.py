@@ -6,7 +6,7 @@ from datetime import timezone
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api_models import OperationFieldOut, OperationOut, RequestTimelineBucket, RunStats
+from app.api_models import AnalysisStatusCounts, OperationFieldOut, OperationOut, RequestTimelineBucket, RunStats
 from app.models import ObservedRequest, RequestFieldUsage, SchemaField, SchemaType, TestRun
 from app.services import NotFoundError, get_run_graph
 from app.operation_identity import operation_key
@@ -106,6 +106,10 @@ async def get_run_stats(session: AsyncSession, run_id: uuid.UUID) -> RunStats:
     row = (await session.execute(
         select(
             *_metrics(),
+            *[func.count().filter(ObservedRequest.analysis_status == status).label(status)
+              for status in ("success", "parse_error", "validation_error", "unsupported", "internal_error")],
+            func.percentile_cont(0.95).within_group(ObservedRequest.duration_ms)
+                .filter(ObservedRequest.duration_ms.is_not(None)).label("p95_duration_ms"),
             func.count().filter(ObservedRequest.operation_type == "query").label("query_requests"),
             func.count().filter(ObservedRequest.operation_type == "mutation").label("mutation_requests"),
             func.count().filter(ObservedRequest.operation_type == "subscription").label("subscription_requests"),
@@ -124,6 +128,9 @@ async def get_run_stats(session: AsyncSession, run_id: uuid.UUID) -> RunStats:
     )).mappings().all()
     return RunStats(
         **graph.summary.model_dump(),
+        analysis_status_counts=AnalysisStatusCounts(**{status: row[status] for status in (
+            "success", "parse_error", "validation_error", "unsupported", "internal_error"
+        )}), p95_duration_ms=row["p95_duration_ms"],
         total_requests=row["request_count"], counted_requests=row["counted_request_count"],
         unique_operations=unique_operations, query_requests=row["query_requests"],
         mutation_requests=row["mutation_requests"], subscription_requests=row["subscription_requests"],

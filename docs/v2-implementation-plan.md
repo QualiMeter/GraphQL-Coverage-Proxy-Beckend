@@ -1,118 +1,78 @@
-# План реализации ТЗ v2.0
+# Этап 5: миграция и план будущего release (не команда на deploy)
 
-База аудита: `main`, `3e2dff5387120a12e94e6171d431293741a77340`.
-Источник: `GraphQL_Coverage_Proxy_Backend_Integration_TZ_v2.docx`, версия 2.0,
-15 ноября 2026; инструкции заказчика и последующее уточнение безопасного AST
-имеют приоритет над альтернативами в документе. P2 исключён.
+Ветка `codex/v2-final-features`, база main `1fd1ffdce3946217e15e8bd1f2d01010d911212f`.
+В этом PR production не меняется; ENABLE_PRODUCTION_DEPLOY остаётся выключенным.
+Merge и VPS release выполняются заказчиком только после независимого ревью.
+P2 отсутствует. [DTO и политика safe AST](../docs/frontend-final-features.md).
 
-## Проверенная основа
+## Новая Alembic revision
 
-Coverage Engine считает выбранные поля при `success AND response_has_data=true`;
-HTTP/GraphQL-ошибки эту семантику не заменяют. Существуют семь таблиц,
-две additive-миграции, AST-анализатор, HTTP proxy, SDL/introspection,
-публичность сервисов и агрегаты operations/stats. Дедупликация схем —
-`service_id + schema_hash`; operationKey — SHA-256 JSON tuple
-`[query_hash, operationName, operationType]`. Эти алгоритмы сохраняются.
+`20261118_final_features` после `20261117_history_journal`:
 
-Локальная исходная ветка `chore/backend-ci` отставала от main и содержала
-незакоммиченный `docs/e2e-integration.md`; она не изменялась. Работа ведётся
-в отдельной копии `.worktrees/integration-v2`, ветка `codex/v2-access-contracts`.
+- `schema_snapshots.display_name VARCHAR(255) NULL`;
+- `observed_requests.safe_graphql_document TEXT NULL`;
+- `observed_requests.document_availability VARCHAR(16) NOT NULL DEFAULT 'unavailable'`;
+- CHECK: unavailable требует NULL document; available/redacted требуют ненулевой
+  text размером 1–65536 UTF-8 bytes; других состояний нет.
 
-На момент аудита единственный открытый PR —
-[#22](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-Beckend/pull/22),
-`638d14838ee54e5ef2825179ba3d16d9adea22db`. Он добавляет один тест
-`test_control_scenario_coverage_through_proxy` в `tests/test_proxy_e2e_postgres.py`:
-5/9 после query, 6/9 после mutation, повторный query повышает hits.
-Тест не дублируется в реализации; его patch проверяется отдельно поверх ветки.
-В PR сообщено о падении Swagger: базовый прогон в текущем окружении его
-не воспроизвёл — 192 passed на PostgreSQL 18.6. Проверки не отключались.
+Нет backfill AST, смены historical hashes/IDs/SDL/type/field/run данных.
+Метаданные исторических схем читаются из их SDL, новые колонки descriptions/args
+и новые индексы не нужны. P95 использует имеющийся run/duration index этапа 4.
+Старые observations автоматически читаются как unavailable/null, label — null.
+Действующие API-клиенты получают дополнительные read fields. PATCH label отдельный,
+по прежним ролям/CSRF; POST introspection не меняет свой lifecycle и контракт.
 
-## Расхождения и последовательность PR
+Новые ограничения: safe normalization до 256 KiB input/10k tokens/20k nodes/depth64,
+stored до 64 KiB. Превышение влияет только на display availability, не forwarding.
+SDL JSON body до 1 MiB, label JSON до 16 KiB; ошибки без исходного текста.
+Типы/поля сохраняемых схем ≤255 символов, не больше 5000 типов в GraphQL type_map (включая служебные)/50000 полей.
 
-| Этап | Расхождение | Результат |
-|---|---|---|
-| 1. Доступ и контракты | Только общий административный ключ, нет пользователей/сессий/ACL | Настоящие пользователи, роли, серверные сессии, CSRF, bootstrap CLI, применение ACL к существующим маршрутам |
-| 2. Multi-service и proxy | Глобальный upstream, нет endpointUrl/SSRF | Nullable endpoint, description, updatedAt; CRUD; блокировка смены endpoint при активном run; DNS pinning, лимиты, маршрутизация run → snapshot → service |
-| 3. Схемы | Introspection глобальная, ограниченные сведения схемы | Introspection выбранного сервиса с общей SSRF-защитой, SDL endpoint, displayName, описания/аргументы/deprecation/связи |
-| 4. История и обращения | История только по snapshot; журнал только limit/offset | История serviceId, стабильные фильтры/сортировки, массив + X-Total-Count; request detail с полями точного snapshot |
-| 5. Статистика и безопасный документ | Нет analysisStatusCounts/P95; документ не хранится | SQL-счётчики, percentile_cont; безопасная копия реального AST, литералы маскированы, fragments/directives сохранены, выдача по ACL |
-| 6. Итоговые проверки и документация | Нет полного multi-service сценария | PostgreSQL, два upstream и параллельных run, SSRF/rebinding, отсутствие секретов в БД/логах/API, согласованные OpenAPI/DTO и отчёт frontend |
+## Безопасный порядок для будущего rollout
 
-Каждый этап — работоспособный PR для ревью, без самостоятельного merge и деплоя.
-До принятия первого этапа остальная P0/P1-функциональность не объявляется готовой.
+1. Оставить `ENABLE_PRODUCTION_DEPLOY` выключенным до и после merge; PR job deploy
+   также gated main/push и не должен запускаться от pull_request. Не включать его
+   ради проверки CI. Проверить полный CI для review HEAD, выполнить независимое ревью.
+2. Снять backup; узнать текущую Alembic revision VPS read-only и восстановить backup
+   в изолированную копию. VPS в рамках этой задачи не опрашивается/не меняется.
+3. На копии пройти **все** pending revisions до head. Если VPS отстаёт от этапов 2–4,
+   учитывать их backfills/index builds, locks и настройки auth/SSRF/forwarded trust,
+   не рассматривать только последнюю миграцию.
+4. Оценить размер/время/lock budget: даже additive DDL и CHECK validation блокируют
+   конкурирующие операции. Этап 4 дополнительно backfills operation_key, поэтому
+   старые writers необходимо остановить до общей цепочки миграций. Не выполнять
+   миграции параллельно с E2E mutations. Согласовать окно, сначала миграции, затем app.
+5. До запуска новой версии проверить production settings: HTTPS same-origin,
+   доверенные forwarded IPs, SSRF policy, cookie/CSRF и начальный admin. Секреты
+   не включать в public JS; значения runtime variables/headers/body не писать в
+   access/APM/trace captures. Application code не логирует raw query/парсер exceptions.
+6. После отдельно одобренного release провести smoke существующих/новых сервисов,
+   исторических snapshots/runs, ACL всех ролей, SDL/label, stats и safe document.
+   Без durations ожидать null, без исторического AST unavailable, а не fake text.
+   Проверить объём: safe text хранится до удаления observations, без automatic TTL;
+   максимальный прирост 64 KiB на новый request, плюс индексы/прочие данные журнала.
 
-## Зафиксированные решения
+Безопасное представление всё ещё содержит настоящие имена операций/aliases/полей
+и бизнес-структуру; это причина сохранения journal ACL. Placeholders не являются
+корректными values для выполнения, код из detail не использовать для replay.
+Saved schema SDL по своему read ACL возвращается полностью, включая author
+schema defaults; это отдельная категория, а не сохранённые runtime variables.
 
-- Браузер: same-origin cookie session; CLI/E2E сохраняет серверный API key.
-- Роли глобальные, доступ к конкретным сервисам задаётся отдельным grant.
-  Публикация даёт чтение агрегатов, но не журнал и не управление.
-- Run create/finish и proxy: operator/admin. Analyst читает журнал при наличии grant.
-- Изменение endpoint блокируется при любом активном run этого сервиса;
-  run и смена конфигурации должны синхронизироваться блокировкой сервиса.
-- Никакого произвольного выбора сервиса без run ID; временный legacy passthrough
-  будет явно настраиваться в этапе 2. В этапе 1 сохранён прежний CLI passthrough;
-  browser proxy уже требует run ID.
-- HTTPS в production; HTTP/локальные адреса только explicit dev mode с allowlist.
-  Валидация при сохранении и соединении, проверка всех DNS-ответов и pinning IP;
-  redirects off, credentials/query/fragment запрещены; bounded body/time/concurrency.
-- После upstream mutation сбой наблюдения не вызывает повтор upstream;
-  контракт должен явно отражать, что запрос мог выполниться.
-- Новое уточнение заказчика: безопасный GraphQL-код входит в P1.
-  Только AST-копия реально выполненного документа, без значений variables,
-  токенов/cookies/ответов; литералы/defaults маскируются; при невозможности
-  безопасной обработки — `documentAvailability: unavailable`.
-  query_hash/operationKey не меняются. Никакого восстановления query из selectedFields.
-- Сравнение прогонов, P50/P99, HTTP-распределения и error timeline — P2, позже.
+## Rollback
 
-## Этап 2: фактическая база и граница PR
+Отключить новые writers/app перед schema downgrade. Предпочтителен rollback app
+с оставлением additive columns. Downgrade revision удаляет labels и safe documents
+(потеря новых display данных), CHECK и колонки; observations/fields/runs сохраняет.
+Не выполнять его на живой новой версии. Backup и отдельное решение владельца обязательны.
 
-После принятия #23 база — main `bf9cdb2cdbcbdc7d7fd2f4e41b10ea8f910c641a`,
-ветка `codex/v2-multi-service`. Реализованы endpoint CRUD, nullable-миграция,
-service lock для run create / endpoint update, pinned DNS transport, явный
-legacy fallback, limits и multi-service PostgreSQL/TCP проверки.
-PR #22 остаётся открытым с тем же HEAD `638d14838ee54e5ef2825179ba3d16d9adea22db`;
-его контрольный тест отдельно проходит поверх этапа 2, не дублируется в ветке.
+## Этап 6
 
-Introspection выбранного endpoint относится к этапу 3. Чтобы глобальная схема
-не попала в configured-сервис до этого этапа, маршрут временно возвращает 409
-и предлагает SDL. Старый путь доступен только explicit legacy mode и использует
-общую SSRF-защиту. Остальные история/аналитика/P95/безопасный AST и P2 не добавлялись.
-[Frontend delta](frontend-multi-service.md), [SSRF](multi-service-security.md),
-[E2E](multi-service-e2e.md), [будущий release](../deploy/STAGE2-RELEASE.md).
+Независимый аудит полного P0/P1 checklist, frontend end-to-end, проверка operational
+logging/trace settings, sizing/retention и прогон миграций на production-like копии.
+Функциональные endpoints этапа 5 готовы к ревью, это не объявление VPS готовым к rollout.
 
-## Этап 3: service-aware introspection
-
-База main 09659aed51f91dd6e93d95a3818497901c96349c (PR #24), ветка
-codex/v2-service-introspection. Временный запрет configured-service introspection
-снят: endpoint выбирает Service, используется существующий DNS-pinned transport.
-Nullable endpoint сохраняет только explicit legacy fallback. Новых миграций нет.
-Dedup/enrichment атомарны под service lock/savepoint; endpoint change во время
-fetch отклоняет запись, конкурентные SDL/introspection возвращают один snapshot.
-[Frontend delta](frontend-introspection.md), [архитектура/лимиты/upstream auth](service-introspection.md).
-SDL download/displayName/расширенные schema DTO, история и P1-аналитика остаются
-последующими работами; P2 не начат.
-
-
-## Этап 4: история и журнал обращений — реализовано для ревью
-
-База main `979c5f9b9078834a92261b53fdc28e9fdff87916` (принятый PR #25),
-ветка `codex/v2-history-requests`. История ровно по serviceId/snapshotId,
-UTC/status filters, стабильная SQL pagination, X-Total-Count, без скрытого limit
-для старых клиентов. Request journal: типизированные AND-фильтры, snapshot-scoped
-EXISTS, operationKey, count, NULLS LAST, detail с реальными selectedFields и
-countedInCoverage. ACL и закрытые metadata сохранены; агрегаты/coverage не менялись.
-Additive migration `20261117_history_journal`: nullable материализованный ключ по
-**прежней** формуле, backfill исторических записей bounded batches, четыре индекса.
-[Frontend контракт и эксплуатационные ограничения](frontend-history-requests.md).
-
-PostgreSQL-тесты проверяют несколько snapshots/сервисов, legacy DTO/pagination,
-UTC-границы, одинаковые timestamps, operation identities, отсутствие дублей,
-чужие requestId/snapshot fields, все роли и отзыв прав, миграцию с 1004 записями.
-Merge/deploy выполняет заказчик после ревью; production deploy не включался.
-
-На этап 5 остаются analysisStatusCounts/P95 и безопасная копия реального AST с
-маскированием литералов/defaults/fragments/directives и проверкой отсутствия секретов.
-Ранее отложенные schema DTO/SDL download/displayName из полного ТЗ не объявляются
-завершёнными: их нужно явно включить в согласованный остаток P0/P1 на этапах 5–6.
-Этап 6 — итоговый аудит P0/P1, сквозные проверки и окончательная документация.
-P2 не начат. Переход к этапу 5 только после ревью и принятия этапа 4.
+Локальная верификация финального этапа 5: PostgreSQL 18.6 / graphql-core 3.3.2 —
+501 passed, без skipped, один прежний Starlette/httpx warning. Дополнительно
+safe AST/schema/PostgreSQL набор на graphql-core 3.2.14 — 51 passed; контрольный
+сценарий открытого PR #22 — 1 passed, 17 deselected. Alembic check, pip check,
+Compose config, deploy-script syntax, compileall и diff check пройдены.
+Результат GitHub CI указывается в описании PR после его завершения.

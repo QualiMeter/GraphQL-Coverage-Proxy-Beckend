@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.api_models import ApiModel, RequestDetailOut, RequestOut, SelectedFieldOut
 from app.contracts import AnalysisStatus, OperationType
@@ -140,7 +141,9 @@ async def list_request_page(session: AsyncSession, run_id: uuid.UUID, filters: R
     column = ObservedRequest.created_at if filters.sort_by == "createdAt" else ObservedRequest.duration_ms
     order = column.asc() if filters.sort_order == "asc" else column.desc()
     tie = ObservedRequest.id.asc() if filters.sort_order == "asc" else ObservedRequest.id.desc()
-    rows = (await session.scalars(select(ObservedRequest).where(*conditions)
+    rows = (await session.scalars(select(ObservedRequest).options(
+        defer(ObservedRequest.safe_graphql_document), defer(ObservedRequest.document_availability),
+    ).where(*conditions)
         .order_by(order.nulls_last(), tie).limit(filters.limit).offset(filters.offset))).all()
     return [request_out(row) for row in rows], total
 
@@ -160,5 +163,6 @@ async def get_request_detail(session: AsyncSession, run_id: uuid.UUID, request_i
         .where(RequestFieldUsage.request_id == request_id, TestRun.id == run_id)
         .distinct().order_by(SchemaType.name, SchemaField.name, SchemaField.return_type))).all()
     return RequestDetailOut(**request_out(row).model_dump(),
+        safe_graphql_document=row.safe_graphql_document, document_availability=row.document_availability,
         counted_in_coverage=row.analysis_status == "success" and row.response_has_data is True,
         selected_fields=[SelectedFieldOut(type_name=t, field_name=f, return_type=r) for t, f, r in fields])
