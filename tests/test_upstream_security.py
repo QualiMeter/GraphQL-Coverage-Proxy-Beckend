@@ -7,7 +7,7 @@ import httpcore
 import httpx
 import pytest
 
-from app.upstream import PinnedBackend, PinnedTransport, UnsafeEndpoint, validate_endpoint, outbound_slot
+from app.upstream import PinnedTransport, UnsafeEndpoint, validate_endpoint, outbound_slot
 from test_graphql_proxy import client, raw_response, upstream  # noqa: F401
 
 

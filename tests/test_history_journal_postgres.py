@@ -1,4 +1,4 @@
-"""Stage 4 contracts against real PostgreSQL, including ACL and historic migration."""
+"""History/journal contracts on PostgreSQL, including ACL and historical migration."""
 
 import asyncio
 import os
@@ -18,7 +18,7 @@ from app.database import get_session
 from app.main import app
 from app.models import GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField, SchemaType, TestRun as Run
 from app.run_analytics import get_run_stats, operation_key
-from app.services import create_run, create_service, finish_run, import_sdl, record_observation
+from app.services import create_run, create_service, import_sdl, record_observation
 from test_postgres_integration import postgres_session  # noqa: F401
 from test_browser_auth_postgres import auth_context, grant, login, TEST_KEY  # noqa: F401
 from test_multi_service_postgres import isolated_database  # noqa: F401

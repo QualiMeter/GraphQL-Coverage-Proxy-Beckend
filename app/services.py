@@ -1,4 +1,4 @@
-"""Database use cases; called by HTTP routes and future proxy integration."""
+"""Schema, run and observation storage shared by HTTP routes and the proxy."""
 
 import json
 import uuid
@@ -382,10 +382,10 @@ async def finish_run(session: AsyncSession, run_id: uuid.UUID, *, include_metada
 
 
 async def record_observation(session: AsyncSession, observation: RequestObservationInput) -> uuid.UUID:
-    """Internal API for the future proxy; never accepts unverified field IDs from a client.
+    """Atomically store an observation and fields verified against its run snapshot.
 
-    The proxy must supply truthful upstream metadata. Cross-snapshot field
-    references are rejected atomically. A failed analysis may have no fields.
+    The caller supplies truthful upstream metadata; unsuccessful analyses cannot
+    claim fields. The run lock serializes recording with finish_run().
     """
     run = await session.scalar(
         select(TestRun).where(TestRun.id == observation.run_id).with_for_update()

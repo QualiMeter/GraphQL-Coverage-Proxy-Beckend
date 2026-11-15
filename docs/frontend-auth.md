@@ -1,8 +1,7 @@
 # Авторизация frontend и управление доступом
 
-Этап 1 ТЗ v2.0 добавляет авторизацию; multi-service, фильтры журнала, P95 и
-безопасное представление GraphQL AST будут отдельными этапами. Эти изменения
-подготовлены для ревью и ещё не подтверждены на production.
+Действующий контракт авторизации. Остальные API-контракты собраны в
+[указателе документации](README.md); наличие кода не подтверждает его выкладку.
 
 Frontend и API используют один origin `https://graphql.rebyte.fun`.
 Все пути относительные. `X-Coverage-Api-Key` остаётся только в доверенных CLI/CI;
@@ -85,7 +84,7 @@ Referer или присланный `X-Forwarded-Host`. Unsafe-запросы с
 При browser session proxy **не пересылает никакие Cookie upstream** и
 **не отдаёт никакие upstream Set-Cookie браузеру**, включая неизвестные имена.
 Это исключает утечку cookie других приложений общего origin и перенос cookies
-между будущими сервисами. Обычные явные Authorization и исходное тело сохраняются.
+между сервисами. Обычные явные Authorization и исходное тело сохраняются.
 CLI/E2E с валидным API key без Origin/Sec-Fetch-* сохраняет Cookie/Set-Cookie
 passthrough; зарезервированные Coverage cookies и внутренние заголовки удаляются
 в любом режиме. Запрос с Origin либо любым Sec-Fetch-* считается browser context
@@ -93,8 +92,8 @@ passthrough; зарезервированные Coverage cookies и внутре
 включают исключение. Browser cookie-auth к стороннему upstream таким способом
 не поддерживается: использовать явный upstream Authorization либо доверенный
 серверный E2E-клиент с отдельным cookie jar на сервис/run. Глобального cookie
-allowlist/jar нет. При добавлении multi-service эта граница должна сохраняться.
-Browser `/graphql` требует run ID и grant; прежний CLI passthrough в этом этапе сохранён.
+allowlist/jar нет. Browser `/graphql` требует run ID и grant. CLI без run ID разрешён только
+при явном `COVERAGE_LEGACY_PROXY=true`; configured-сервисы используют свой endpoint.
 
 Все `/api/*` и `/graphql` ответы имеют `Cache-Control: no-store` и Vary по
 Cookie/API key. Тела auth ограничены 16 КиБ, в том числе chunked.
@@ -107,8 +106,7 @@ Cookie/API key. Тела auth ограничены 16 КиБ, в том числ
 3. Отправлять cookie через `credentials: 'same-origin'` и CSRF на unsafe-запросах.
 4. Показывать действия по роли. 403/404 от сервера остаются окончательной проверкой.
 5. Admin создаёт пользователей и назначает grants; operator создаёт сервисы/схемы/runs.
-6. Подключать новые DTO последующих этапов только после их принятия.
-   Не подменять ошибки mock-данными.
+6. Использовать [действующие DTO](README.md); не подменять ошибки mock-данными.
 
 ```ts
 let session: SessionOut = { user: null, csrfToken: null, expiresAt: null };
@@ -146,7 +144,7 @@ Origin устанавливает браузер; не пытаться уста
 CORS для cookie-сессий не включается: same-origin достаточно. По умолчанию
 список CORS пуст, `allow_credentials=false`. Для существующих отдельных
 публичных клиентов можно явно задать CORS_ORIGINS; `X-Total-Count` включён
-в Expose-Headers, но сами счётчики будут реализованы на следующих этапах.
+в Expose-Headers и возвращает total совпадений в истории и журнале до pagination.
 
 ## Ошибки
 
@@ -172,7 +170,8 @@ Scrypt: N=2^17, r=8, p=1, случайная соль 16 байт. Одновр�
 Production Compose требует точные IP непосредственного peer после Docker NAT,
 запускает `app.server` и фиксирует dev mode=false. Wildcard и сети отвергаются.
 Nginx перезаписывает X-Forwarded-Proto через реальный `$scheme`, а XFF — `$remote_addr`.
-Подробности и порядок merge при autodeploy: [deploy/PR23-RELEASE.md](../deploy/PR23-RELEASE.md).
+Конфигурация reverse proxy: [deploy/README.md](../deploy/README.md).
+Исторический порядок внедрения auth: [PR23-RELEASE.md](../deploy/PR23-RELEASE.md).
 
 ## Bootstrap, обслуживание и миграция
 
@@ -198,9 +197,6 @@ auth_sessions, auth_service_grants, auth_login_throttles и индексы. Не
 учётные записи/сессии/grants; исторические данные сохраняются. Для rollback
 сначала завершить процессы новой версии. Не выполнять downgrade без резервной
 копии auth-данных, если уже заведены реальные аккаунты.
-
-На VPS команды в рамках этой задачи не выполнялись; это инструкция для
-согласованной выкладки после ревью.
 
 Основание параметров и защиты: [OWASP Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html),
 [Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html),

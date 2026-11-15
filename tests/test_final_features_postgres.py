@@ -1,4 +1,4 @@
-"""Stage 5 on genuine PostgreSQL: percentile, safe wire AST, metadata and ACL."""
+"""PostgreSQL checks for percentiles, safe wire AST, schema metadata and ACL."""
 
 import asyncio
 import hashlib
@@ -22,7 +22,7 @@ from app.auth_models import ServiceGrant
 from app.database import get_session, get_session_factory
 from app.e2e_capture import capture_e2e_exchange
 from app.main import app
-from app.models import GraphQLService, ObservedRequest, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
+from app.models import GraphQLService, ObservedRequest, SchemaField, SchemaSnapshot, SchemaType
 from app.run_analytics import get_run_stats, operation_key
 from app.services import create_run, create_service, finish_run, get_run_graph, import_sdl
 from app.upstream import PinnedTransport

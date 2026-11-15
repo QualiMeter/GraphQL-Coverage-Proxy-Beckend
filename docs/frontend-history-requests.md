@@ -1,9 +1,8 @@
-# Этап 4: история сервиса и журнал обращений
+# История сервиса и журнал обращений
 
-Это контракт этапа 4; additive изменения этапа 5 описаны в
-[актуальном frontend delta](frontend-final-features.md).
-
-База: main `979c5f9b9078834a92261b53fdc28e9fdff87916` (PR #25).
+Фильтры, pagination, selectedFields и права доступа. Дополнительные поля detail:
+[безопасный AST](frontend-final-features.md) и
+[очищенные ошибки upstream](graphql-error-details.md).
 Same-origin `https://graphql.rebyte.fun`: используйте относительные `/api/...`,
 существующую серверную cookie session; административный API key в браузер не передаётся.
 GET не требует CSRF; изменяющие маршруты сохраняют прежние Origin/CSRF проверки.
@@ -162,16 +161,16 @@ snapshot выбранного run, сортируются по typeName/fieldNam
 анонимную историю. Ошибки не содержат total, endpoint или приватных метаданных.
 Существующие cookie, HttpOnly/Secure/SameSite и role/CSRF не изменены.
 
-GraphQL-код/variables/токены/cookies/response bodies не добавлены ни в БД, ни в DTO.
-`safeGraphqlDocument` и `documentAvailability` в этом этапе **не вводятся**.
-Нельзя восстанавливать фиктивный GraphQL query из selectedFields.
+Raw query/variables/токены/cookies/response bodies не сохраняются.
+Detail дополнен masked AST и очищенными GraphQL error details по контрактам выше;
+список RequestOut их не содержит. Нельзя восстанавливать query из selectedFields.
 
 Рекомендуемый порядок frontend-интеграции: service history с явной pagination →
 открытие run по его snapshotId → таблица requests с total и фильтрами → detail →
 переход из `/operations` по operationKey. Для viewer/anonymous не запрашивайте журнал.
-P95/analysisStatusCounts/безопасный AST — этап 5; P2 пока исключён.
+P95/analysisStatusCounts и безопасный AST описаны в [расширенных DTO](frontend-final-features.md).
 
-## Миграция и будущий release
+## Миграция и эксплуатационные ограничения
 
 `20261117_history_journal` после `20261116_service_endpoints`:
 nullable `observed_requests.operation_key`, backfill точной прежней Python-формулой
@@ -199,8 +198,7 @@ backup, оценка размера/времени на копии PostgreSQL и
 writers; сначала миграция, затем новая версия backend. Downgrade удаляет только
 новый ключ/индексы, без удаления observations, но сначала нужно остановить новую версию.
 
-В рамках PR production не меняется, deploy не включается и merge не выполняется.
-Сохраняйте `ENABLE_PRODUCTION_DEPLOY` выключенным при последующем ручном ревью/слиянии.
+Порядок выпуска и состояние autodeploy согласуются отдельно с оператором.
 Локальные проверки: `TEST_DATABASE_URL=<isolated-postgres> pytest`; миграции
 проверяются на PostgreSQL, SQLite не используется. Полный workflow дополнительно
 проверяет PostgreSQL 16 и Nginx → Docker → Uvicorn cookie/CSRF smoke.

@@ -9,7 +9,7 @@ from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app import api, upstream
+from app import upstream
 from app.auth import hash_password, token_hash
 from app.auth_models import BrowserSession, ServiceGrant, User
 from app.database import get_session, get_session_factory

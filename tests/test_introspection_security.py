@@ -12,7 +12,7 @@ from app.schema_collector import (
     SchemaConnectionError, SchemaRedirectError, SchemaResponseTooLargeError, SchemaCapacityError,
     IntrospectionDisabledError, GraphQLIntrospectionError, InvalidIntrospectionResponseError,
 )
-from app.upstream import PinnedTransport, outbound_slot
+from app.upstream import outbound_slot
 from test_schema_collector import introspection_payload
 from test_upstream_security import SocketStream
 

@@ -1,4 +1,4 @@
-"""Shared contract with future proxy and GraphQL analyzer developers."""
+"""Shared types for GraphQL analysis and observation storage."""
 
 import uuid
 from dataclasses import dataclass, field
@@ -31,12 +31,7 @@ class GraphQLQueryInput:
 
 @dataclass(frozen=True)
 class AnalysisResult:
-    """Shared analyzer result consumed by coverage storage.
-
-    A successful result contains unique ``(type_name, field_name)`` schema
-    coordinates for the selected fields. Failed or unsupported analyses must
-    use an empty ``fields`` tuple.
-    """
+    """Unique selected schema coordinates; unsuccessful analyses have no fields."""
 
     status: AnalysisStatus
     operation_type: OperationType | None = None
