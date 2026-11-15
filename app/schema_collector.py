@@ -7,12 +7,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import anyio
 import httpx
 from fastapi import HTTPException
 from graphql import GraphQLError, build_client_schema, get_introspection_query, print_schema, validate_schema
 from graphql.type.schema import GraphQLSchema
 
+from app.schema_work import schema_work
 from app.schema_parser import ParsedSchema, parse_sdl
 from app.upstream import (
     EndpointResolutionError, EndpointResolutionTimeout, MAX_RESPONSE_BYTES,
@@ -215,13 +215,13 @@ async def collect_schema(target_url: str, *, timeout: float = 15.0,
             if status >= 400:
                 if status in {400, 403}:
                     try:
-                        if _disabled(await anyio.to_thread.run_sync(_json, bytes(content))):
+                        if _disabled(await schema_work(_json, bytes(content))):
                             raise IntrospectionDisabledError(IntrospectionDisabledError.public_detail)
                     except InvalidIntrospectionJSONError:
                         pass
                 raise SchemaHTTPError(f"GraphQL endpoint returned HTTP {status}")
-            payload = await anyio.to_thread.run_sync(_json, bytes(content))
-            return await anyio.to_thread.run_sync(_build_schema, payload)
+            payload = await schema_work(_json, bytes(content))
+            return await schema_work(_build_schema, payload)
     except HTTPException:
         raise SchemaCapacityError(SchemaCapacityError.public_detail) from None
     except (TimeoutError, httpx.TimeoutException):

@@ -8,16 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import AnalysisStatusCounts, OperationFieldOut, OperationOut, RequestTimelineBucket, RunStats
 from app.models import ObservedRequest, RequestFieldUsage, SchemaField, SchemaType, TestRun
-from app.services import NotFoundError, get_run_graph
+from app.services import NotFoundError, coverage_summary, counted_observation, COVERAGE_KINDS
 from app.operation_identity import operation_key
 
 
 def _counted():
     # Same eligibility as get_graph(). HTTP/GraphQL errors do not override data.
-    return and_(
-        ObservedRequest.analysis_status == "success",
-        ObservedRequest.response_has_data.is_(True),
-    )
+    return counted_observation()
 
 
 def _metrics():
@@ -101,8 +98,19 @@ async def list_operations(
 
 
 async def get_run_stats(session: AsyncSession, run_id: uuid.UUID) -> RunStats:
-    # Reuse Coverage Engine, including its denominator, rounding and empty schema semantics.
-    graph = await get_run_graph(session, run_id)
+    run = await _ensure_run(session, run_id)
+    # Only OBJECT fields form the coverage denominator. Count each covered
+    # field once with the same eligibility predicate used by the graph.
+    covered = select(RequestFieldUsage.field_id).join(
+        ObservedRequest, ObservedRequest.id == RequestFieldUsage.request_id,
+    ).where(ObservedRequest.run_id == run_id, _counted()).distinct().subquery()
+    total, hit = (await session.execute(
+        select(func.count(SchemaField.id), func.count(covered.c.field_id))
+        .select_from(SchemaField).join(SchemaType, SchemaType.id == SchemaField.type_id)
+        .outerjoin(covered, covered.c.field_id == SchemaField.id)
+        .where(SchemaType.snapshot_id == run.snapshot_id, SchemaType.kind.in_(COVERAGE_KINDS))
+    )).one()
+    summary = coverage_summary(total, hit)
     row = (await session.execute(
         select(
             *_metrics(),
@@ -127,7 +135,7 @@ async def get_run_stats(session: AsyncSession, run_id: uuid.UUID) -> RunStats:
         .where(ObservedRequest.run_id == run_id).group_by(bucket).order_by(bucket)
     )).mappings().all()
     return RunStats(
-        **graph.summary.model_dump(),
+        **summary.model_dump(),
         analysis_status_counts=AnalysisStatusCounts(**{status: row[status] for status in (
             "success", "parse_error", "validation_error", "unsupported", "internal_error"
         )}), p95_duration_ms=row["p95_duration_ms"],

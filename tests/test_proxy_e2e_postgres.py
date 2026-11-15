@@ -7,13 +7,14 @@ import uuid
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.datastructures import State
 from sqlalchemy import select, update
 
 from app import proxy
 from app.analyzer_adapter import analyze_e2e_query
 from app.contracts import AnalysisResult, FieldReference
-from app.database import Base, get_session
+from app.database import Base, get_session, get_session_factory
 from app.main import app
 from app.models import ObservedRequest, RequestFieldUsage, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
 from app.services import create_run, create_service, finish_run, import_sdl
@@ -30,6 +31,9 @@ async def http_client(postgres_session, monkeypatch):
         yield postgres_session
 
     app.dependency_overrides[get_session] = dependency
+    sessions = async_sessionmaker(bind=postgres_session.bind, expire_on_commit=False,
+                                 join_transaction_mode="create_savepoint")
+    app.dependency_overrides[get_session_factory] = lambda: sessions
     app.dependency_overrides[proxy.get_proxy_session] = dependency
     monkeypatch.setattr(app, "state", State({"coverage_analyzer": None}))
     try:
@@ -39,6 +43,7 @@ async def http_client(postgres_session, monkeypatch):
         ) as client:
             yield client
     finally:
+        app.dependency_overrides.pop(get_session_factory, None)
         app.dependency_overrides.pop(get_session, None)
         app.dependency_overrides.pop(proxy.get_proxy_session, None)
 

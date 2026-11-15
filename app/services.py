@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
-from sqlalchemy import false, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ from app.schema_collector import collect_schema
 from app.config import target_graphql_url
 from app.upstream import legacy_enabled
 from app.schema_parser import ParsedSchema, parse_sdl
+from app.schema_work import schema_work
 
 
 class NotFoundError(Exception):
@@ -248,8 +249,26 @@ async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> 
     if await session.get(GraphQLService, service_id) is None:
         raise NotFoundError("GraphQL service not found")
     return await _save_parsed_schema(
-        session, service_id, parse_sdl(sdl), source="sdl"
+        session, service_id, await schema_work(parse_sdl, sdl), source="sdl"
     )
+
+
+async def import_sdl_schema(
+    sessions: SessionProvider, service_id: uuid.UUID, sdl: str, *,
+    authorize: SchemaPermissionCheck,
+) -> SchemaOut:
+    # Match introspection's separate read/compute/write phases. No caller-owned
+    # transaction is committed or rolled back to release a connection.
+    async with sessions() as session:
+        await authorize(session)
+        if await session.get(GraphQLService, service_id) is None:
+            raise NotFoundError("GraphQL service not found")
+    parsed = await schema_work(parse_sdl, sdl)
+    async with sessions() as session:
+        async with session.begin():
+            return await _save_parsed_schema(
+                session, service_id, parsed, source="sdl", authorize=authorize, commit=False,
+            )
 
 
 async def import_introspection_schema(
@@ -424,19 +443,22 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
     return row.id
 
 
-async def get_graph(
+COVERAGE_KINDS = frozenset({"OBJECT"})
+
+
+def counted_observation():
+    return and_(
+        ObservedRequest.analysis_status == "success",
+        ObservedRequest.response_has_data.is_(True),
+    )
+
+
+async def load_graph(
     session: AsyncSession, snapshot_id: uuid.UUID, run_id: uuid.UUID | None = None
-) -> CoverageGraph:
+) -> tuple:
     snapshot = await session.get(SchemaSnapshot, snapshot_id)
     if snapshot is None:
         raise NotFoundError("Schema snapshot not found")
-    metadata = schema_metadata(snapshot.schema_sdl)
-    roots = root_types(metadata)
-    root_operations: dict[str, list[str]] = {}
-    for kind, name in roots.model_dump().items():
-        if name is not None:
-            root_operations.setdefault(name, []).append(kind)
-
     hit_counts: dict[uuid.UUID, int] = {}
     if run_id is not None:
         run = await session.get(TestRun, run_id)
@@ -447,23 +469,43 @@ async def get_graph(
             .join(ObservedRequest, ObservedRequest.id == RequestFieldUsage.request_id)
             .where(
                 ObservedRequest.run_id == run_id,
-                ObservedRequest.analysis_status == "success",
-                ObservedRequest.response_has_data.is_(True),
+                counted_observation(),
             )
             .group_by(RequestFieldUsage.field_id)
         )).all()
         hit_counts = {field_id: count for field_id, count in counts}
 
-    type_rows = (await session.scalars(
-        select(SchemaType).where(SchemaType.snapshot_id == snapshot_id)
+    type_rows = (await session.execute(
+        select(SchemaType.id, SchemaType.name, SchemaType.kind).where(SchemaType.snapshot_id == snapshot_id)
         .order_by(SchemaType.name)
     )).all()
-    field_rows = (await session.scalars(
-        select(SchemaField).join(SchemaType, SchemaType.id == SchemaField.type_id)
+    field_rows = (await session.execute(
+        select(SchemaField.id, SchemaField.type_id, SchemaField.name, SchemaField.return_type,
+               SchemaField.target_type_id, SchemaField.is_deprecated).join(SchemaType, SchemaType.id == SchemaField.type_id)
         .where(SchemaType.snapshot_id == snapshot_id).order_by(SchemaField.name)
     )).all()
+    # SQL result tuples contain scalar values only, with no lazy ORM state.
+    return snapshot_id, run_id, snapshot.schema_sdl, type_rows, field_rows, hit_counts
+
+
+def coverage_summary(total_fields: int, covered_fields: int) -> CoverageSummary:
+    return CoverageSummary(
+        total_fields=total_fields, covered_fields=covered_fields,
+        coverage_percent=round(covered_fields * 100 / total_fields, 2) if total_fields else 0.0,
+    )
+
+
+def build_graph(data: tuple) -> CoverageGraph:
+    snapshot_id, run_id, sdl, type_rows, field_rows, hit_counts = data
+    metadata = schema_metadata(sdl)
+    roots = root_types(metadata)
+    root_operations: dict[str, list[str]] = {}
+    for kind, name in roots.model_dump().items():
+        if name is not None:
+            root_operations.setdefault(name, []).append(kind)
+
     type_by_id = {row.id: row for row in type_rows}
-    fields_by_type: dict[uuid.UUID, list[SchemaField]] = {}
+    fields_by_type: dict[uuid.UUID, list] = {}
     for field in field_rows:
         fields_by_type.setdefault(field.type_id, []).append(field)
 
@@ -498,7 +540,7 @@ async def get_graph(
                     from_type=type_row.name, field=field.name,
                     to_type=target.name, covered=covered,
                 ))
-        if type_row.kind == "OBJECT":
+        if type_row.kind in COVERAGE_KINDS:
             total_fields += len(raw_fields)
             covered_fields += type_covered
         graph_types.append(GraphType(
@@ -512,12 +554,17 @@ async def get_graph(
 
     return CoverageGraph(
         schema_id=snapshot_id, run_id=run_id, root_types=roots,
-        summary=CoverageSummary(
-            total_fields=total_fields, covered_fields=covered_fields,
-            coverage_percent=round(covered_fields * 100 / total_fields, 2) if total_fields else 0.0,
-        ),
+        summary=coverage_summary(total_fields, covered_fields),
         types=graph_types, relations=relations,
     )
+
+
+async def get_graph(
+    session: AsyncSession, snapshot_id: uuid.UUID, run_id: uuid.UUID | None = None,
+) -> CoverageGraph:
+    # Internal callers retain ownership of their transaction. HTTP callers load
+    # the same scalar data in a scoped session and close it before schema_work.
+    return await schema_work(build_graph, await load_graph(session, snapshot_id, run_id))
 
 
 async def get_run_graph(session: AsyncSession, run_id: uuid.UUID) -> CoverageGraph:
