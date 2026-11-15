@@ -1,7 +1,5 @@
 """Read-only run analytics over persisted observations; no request bodies needed."""
 
-import hashlib
-import json
 import uuid
 from datetime import timezone
 
@@ -11,14 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api_models import OperationFieldOut, OperationOut, RequestTimelineBucket, RunStats
 from app.models import ObservedRequest, RequestFieldUsage, SchemaField, SchemaType, TestRun
 from app.services import NotFoundError, get_run_graph
-
-
-def operation_key(query_hash: str, operation_name: str | None, operation_type: str) -> str:
-    # JSON preserves null versus a name and avoids ambiguous delimiter concatenation.
-    identity = json.dumps(
-        [query_hash, operation_name, operation_type], ensure_ascii=True, separators=(",", ":")
-    )
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+from app.operation_identity import operation_key
 
 
 def _counted():

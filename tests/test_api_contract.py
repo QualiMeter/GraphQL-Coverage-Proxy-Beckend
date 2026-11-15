@@ -48,3 +48,25 @@ def test_service_validation_never_echoes_submitted_secrets(monkeypatch):
         assert all(secret not in response.text for secret in ("private-password", "private-token", "Secret supplied"))
         response = client.post("/api/services", content=b"x" * 16_385)
         assert response.status_code == 413
+
+
+def test_history_journal_openapi_typed_filters_and_detail():
+    schema = app.openapi()
+    paths = schema['paths']
+    history = paths['/api/runs']['get']
+    journal = paths['/api/runs/{run_id}/requests']['get']
+    for operation, required in ((history, {'snapshotId','serviceId','status','from','to','limit','offset'}),
+        (journal, {'operationKey','operationName','operationType','typeName','fieldName','analysisStatus',
+                   'graphqlHasErrors','httpStatus','httpStatusClass','from','to','sortBy','sortOrder','limit','offset'})):
+        assert required <= {p['name'] for p in operation['parameters']}
+        assert operation['responses']['200']['headers']['X-Total-Count']['schema']['type'] == 'integer'
+        assert operation['responses']['200']['content']['application/json']['schema']['type'] == 'array'
+    params = {p['name']: p['schema'] for p in journal['parameters']}
+    assert params['sortBy']['enum'] == ['createdAt', 'durationMs']
+    assert params['sortOrder']['enum'] == ['asc', 'desc']
+    assert params['limit']['minimum'] == 1 and params['limit']['maximum'] == 500
+    assert params['offset']['minimum'] == 0
+    detail = paths['/api/runs/{run_id}/requests/{request_id}']['get']
+    assert detail['responses']['200']['content']['application/json']['schema']['$ref'].endswith('/RequestDetailOut')
+    assert 'operationKey' in schema['components']['schemas']['RequestOut']['properties']
+    assert {'countedInCoverage','selectedFields'} <= schema['components']['schemas']['RequestDetailOut']['properties'].keys()

@@ -1,15 +1,16 @@
 """Frontend-facing REST endpoints with role and service access checks."""
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from graphql import GraphQLError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import (
-    CoverageGraph, RequestOut, RunCreate, RunOut, SchemaImport, SchemaIntrospectionImport,
+    CoverageGraph, RequestDetailOut, RequestOut, RunCreate, RunOut, SchemaImport, SchemaIntrospectionImport,
     SchemaOut, SchemaImportErrorOut, ServiceCreate, ServiceOut, ServiceUpdate,
     OperationOut, OperationType, RunStats,
 )
@@ -23,8 +24,14 @@ from app.services import (
     ConflictError, NotFoundError, SchemaEndpointChanged, SchemaEndpointNotConfigured, update_service, get_service, create_run, create_service,
     ensure_visible_run, ensure_visible_service, ensure_visible_snapshot, finish_run,
     get_graph, get_run_graph, import_introspection_schema, import_sdl,
-    list_requests, list_runs, list_schemas, list_services,
+    list_schemas, list_services,
 )
+
+from app.journal import RunFilters, RequestFilters, list_run_page, list_request_page, get_request_detail
+
+TOTAL_RESPONSE = {200: {"headers": {"X-Total-Count": {
+    "description": "Matching records before limit/offset, after ACL checks.", "schema": {"type": "integer"}
+}}}, 404: {"description": "Resource not found or inaccessible"}}
 
 
 router = APIRouter(prefix="/api", tags=["Coverage API"],
@@ -206,16 +213,23 @@ async def post_run(payload: RunCreate, session: AsyncSession = Session,
         raise api_errors(exc) from exc
 
 
-@router.get("/runs", response_model=list[RunOut])
+@router.get("/runs", response_model=list[RunOut], responses=TOTAL_RESPONSE,
+            description="Exactly one snapshotId or serviceId. UTC [from,to), startedAt DESC/id DESC. "
+                        "Omitted limit returns all matches for legacy compatibility. Metadata only for admin/CLI.")
 async def get_runs(
-    snapshot_id: uuid.UUID = Query(alias="snapshotId"),
+    response: Response, filters: Annotated[RunFilters, Query()],
     session: AsyncSession = Session, principal: Principal = Depends(current_principal),
 ):
     try:
-        await ensure_visible_snapshot(session, snapshot_id, **visibility_kwargs(principal))
+        if filters.snapshot_id is not None:
+            await ensure_visible_snapshot(session, filters.snapshot_id, **visibility_kwargs(principal))
+        else:
+            await ensure_visible_service(session, filters.service_id, **visibility_kwargs(principal))
+        rows, total = await list_run_page(session, filters, include_metadata=principal.admin)
+        response.headers["X-Total-Count"] = str(total)
+        return rows
     except NotFoundError as exc:
         raise api_errors(exc) from exc
-    return await list_runs(session, snapshot_id, include_metadata=principal.admin)
 
 
 @router.post(
@@ -279,17 +293,32 @@ async def get_stats(
 
 
 @router.get(
-    "/runs/{run_id}/requests", response_model=list[RequestOut],
+    "/runs/{run_id}/requests", response_model=list[RequestOut], responses=TOTAL_RESPONSE,
+    description="Analyst/operator with service grant, admin or trusted CLI. All filters combine with AND. "
+                "UTC [from,to); duration NULLs last, id tie-breaker in the same direction. Publicity does not open the journal.",
 )
 async def get_requests(
-    run_id: uuid.UUID,
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    session: AsyncSession = Session,
+    run_id: uuid.UUID, response: Response, filters: Annotated[RequestFilters, Query()],
+    session: AsyncSession = Session, principal: Principal = Depends(require_analyst),
+):
+    try:
+        await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
+        rows, total = await list_request_page(session, run_id, filters)
+        response.headers["X-Total-Count"] = str(total)
+        return rows
+    except NotFoundError as exc:
+        raise api_errors(exc) from exc
+
+
+@router.get("/runs/{run_id}/requests/{request_id}", response_model=RequestDetailOut,
+            responses={404: {"description": "Run/request not found, inaccessible or mismatched"}},
+            description="Journal permissions apply. Real selected fields of this run's snapshot; no GraphQL document or bodies stored/reconstructed.")
+async def get_request(
+    run_id: uuid.UUID, request_id: uuid.UUID, session: AsyncSession = Session,
     principal: Principal = Depends(require_analyst),
 ):
     try:
         await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
-        return await list_requests(session, run_id, limit, offset)
+        return await get_request_detail(session, run_id, request_id)
     except NotFoundError as exc:
         raise api_errors(exc) from exc

@@ -45,11 +45,15 @@ async def test_auth_migration_preserves_existing_services_snapshots_runs_and_obs
 
         async def history():
             async with engine.connect() as connection:
-                return [await connection.scalar(text(f"SELECT jsonb_agg(to_jsonb(t) - 'endpoint_url' - 'description' - 'updated_at') FROM {table} t"))
+                return [await connection.scalar(text(f"SELECT jsonb_agg(to_jsonb(t) - 'endpoint_url' - 'description' - 'updated_at' - 'operation_key') FROM {table} t"))
                         for table in ("graphql_services", "schema_snapshots", "test_runs", "observed_requests")]
         before = await history()
         await migrate("upgrade", "head")
         assert await history() == before
+        async with engine.connect() as connection:
+            # The historical row lacks identity; the new cache must stay null.
+            assert await connection.scalar(text("SELECT operation_key FROM observed_requests WHERE id=:id"),
+                                           {"id": observation}) is None
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT endpoint_url FROM graphql_services")) is None
             assert await connection.scalar(text("SELECT description FROM graphql_services")) is None
