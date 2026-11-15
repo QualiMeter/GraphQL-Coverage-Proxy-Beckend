@@ -432,6 +432,9 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
         analysis_status=analysis.status,
         response_has_data=observation.response_has_data,
         graphql_has_errors=observation.graphql_has_errors,
+        graphql_error_count=observation.graphql_errors.count,
+        graphql_error_details_availability=observation.graphql_errors.availability,
+        graphql_error_details=observation.graphql_errors.details,
         duration_ms=observation.duration_ms,
         error_code=analysis.error_code,
     )

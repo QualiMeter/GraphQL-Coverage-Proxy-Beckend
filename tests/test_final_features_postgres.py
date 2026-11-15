@@ -309,8 +309,11 @@ async def test_historical_migration_and_safe_document_constraints(isolated_datab
     await migrate('upgrade','head')
     async with isolated_database() as session:
         after=(await session.execute(text('SELECT to_jsonb(t) FROM observed_requests t'))).scalar()
-        assert {k:v for k,v in after.items() if k not in ('safe_graphql_document','document_availability')}==before
+        assert {k:v for k,v in after.items() if k not in ('safe_graphql_document','document_availability',
+            'graphql_error_count','graphql_error_details','graphql_error_details_availability')}==before
         assert after['safe_graphql_document'] is None and after['document_availability']=='unavailable'
+        assert after['graphql_error_count'] is None and after['graphql_error_details'] is None
+        assert after['graphql_error_details_availability'] == 'unavailable'
         assert (await session.get(SchemaSnapshot,snapshot.id)).display_name is None
         for document,status in ((None,'available'),('{ field }','unavailable'),('x'*65537,'redacted'),('', 'available'),(None,'unknown')):
             with pytest.raises(IntegrityError):

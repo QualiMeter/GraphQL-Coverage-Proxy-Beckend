@@ -173,6 +173,8 @@ async def test_http_exchange_committed_before_response_and_correct_snapshot(
     assert row.http_status == 201 and row.http_method == "POST"
     assert row.duration_ms is not None and row.duration_ms >= 0
     assert row.response_has_data is True and row.graphql_has_errors is True
+    assert row.graphql_error_count == 1 and row.graphql_error_details_availability == "sanitized"
+    assert row.graphql_error_details == [{"code": None, "path": None, "locations": [], "safeMessage": None}]
     field_snapshots = (await session.scalars(
         select(SchemaType.snapshot_id).join(SchemaField, SchemaField.type_id == SchemaType.id)
         .join(RequestFieldUsage, RequestFieldUsage.field_id == SchemaField.id)
@@ -308,6 +310,10 @@ async def test_unverifiable_response_never_claims_data_or_coverage(
     assert row.analysis_status == "success"
     assert row.response_has_data is (False if case == "errors_only" else None)
     assert row.graphql_has_errors is (True if case == "errors_only" else None)
+    assert row.graphql_error_count == (1 if case == "errors_only" else None)
+    assert row.graphql_error_details_availability == ("sanitized" if case == "errors_only" else "unavailable")
+    assert row.graphql_error_details == ([{"code": None, "path": None, "locations": [], "safeMessage": None}]
+                                         if case == "errors_only" else None)
     graph = (await http_client.get(f"/api/runs/{run.id}/coverage")).json()
     assert graph["summary"]["coveredFields"] == 0
 

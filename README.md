@@ -15,6 +15,7 @@
 
 Регистрация для просмотра опубликованных сервисов не нужна. В этой ветке добавлены
 серверные сессии, роли и ACL (этап 1 v2.0, до production не выложено).
+[Безопасные GraphQL error details](docs/graphql-error-details.md) ·
 [Контракт авторизации и bootstrap](docs/frontend-auth.md) ·
 [план следующих P0/P1](docs/v2-implementation-plan.md).
 CLI/E2E сохраняет серверный API key, браузер использует cookie+CSRF.

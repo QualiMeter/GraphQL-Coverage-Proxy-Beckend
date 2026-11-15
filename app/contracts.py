@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from app.safe_document import SafeDocument
+from app.graphql_errors import ErrorSummary
 
 
 AnalysisStatus = Literal[
@@ -55,3 +56,4 @@ class RequestObservationInput:
     duration_ms: int | None = None
     query_hash: str | None = None
     safe_document: SafeDocument = field(default_factory=SafeDocument)
+    graphql_errors: ErrorSummary = field(default_factory=ErrorSummary)

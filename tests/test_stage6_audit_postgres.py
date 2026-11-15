@@ -298,20 +298,24 @@ async def test_operation_name_migration_preserves_rows_and_refuses_lossy_downgra
     assert await column_type() == "character varying"
     async with isolated_database() as session:
         for name in (None, "Legacy", "N" * 255):
-            session.add(ObservedRequest(run_id=run.id, operation_name=name, operation_type="query", query_hash="a" * 64,
-                                        http_method="POST", analysis_status="success", duration_ms=42))
+            # Insert the historical column set, independent of current ORM columns.
+            await session.execute(text("""INSERT INTO observed_requests
+                (id,run_id,operation_name,operation_type,query_hash,http_method,analysis_status,duration_ms)
+                VALUES (gen_random_uuid(),:run,:name,'query',:hash,'POST','success',42)"""),
+                {"run": run.id, "name": name, "hash": "a" * 64})
         await session.commit()
     before = await rows()
-    await migrate("upgrade", "head")
+    await migrate("upgrade", CURRENT_REVISION)
     assert await column_type() == "text" and await rows() == before
-    await migrate("check")
     # Safe downgrade remains supported, including null and boundary names.
     await migrate("downgrade", PREVIOUS_REVISION)
     assert await rows() == before
-    await migrate("upgrade", "head")
+    await migrate("upgrade", CURRENT_REVISION)
     async with isolated_database() as session:
-        session.add(ObservedRequest(run_id=run.id, operation_name="N" * 256, operation_type="mutation",
-                                    query_hash="b" * 64, http_method="POST", analysis_status="success"))
+        await session.execute(text("""INSERT INTO observed_requests
+            (id,run_id,operation_name,operation_type,query_hash,http_method,analysis_status)
+            VALUES (gen_random_uuid(),:run,:name,'mutation',:hash,'POST','success')"""),
+            {"run": run.id, "name": "N" * 256, "hash": "b" * 64})
         await session.commit()
     with_long_name = await rows()
     failed = await migrate("downgrade", PREVIOUS_REVISION, success=False)
@@ -319,4 +323,5 @@ async def test_operation_name_migration_preserves_rows_and_refuses_lossy_downgra
     assert await column_type() == "text" and await rows() == with_long_name
     async with isolated_database() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
+    await migrate("upgrade", "head")
     await migrate("check")
