@@ -102,7 +102,7 @@ X-Total-Count: 1
 | Query | Правило |
 |---|---|
 | `operationKey` | Точное совпадение, 64 lowercase hex символа; берите из `/operations` или RequestOut |
-| `operationName` | Точное, case-sensitive, без substring; omission включает безымянные, пустая строка означает точное пустое имя, не null |
+| `operationName` | Точное полное имя, case-sensitive, без substring и лимита 255 символов; omission включает безымянные, пустая строка означает точное пустое имя, не null |
 | `operationType` | `query`, `mutation`, `subscription` |
 | `typeName` | Любое реально выбранное поле указанного типа в snapshot run |
 | `fieldName` | Точное имя поля; обязательно вместе с typeName, иначе 422 |

@@ -106,7 +106,10 @@ async def list_services(session: AsyncSession, *, public_only: bool = False, use
             for row, granted in rows]
 
 
-async def update_service(session: AsyncSession, service_id: uuid.UUID, changes: dict) -> ServiceOut:
+async def update_service(
+    session: AsyncSession, service_id: uuid.UUID, changes: dict,
+    *, authorize: Callable[[AsyncSession], Awaitable[None]] | None = None,
+) -> ServiceOut:
     # All run creation and endpoint updates lock the same service row. This is
     # necessary even when the active run belongs to a different snapshot.
     row = await session.scalar(
@@ -115,6 +118,8 @@ async def update_service(session: AsyncSession, service_id: uuid.UUID, changes: 
     )
     if row is None:
         raise NotFoundError("GraphQL service not found")
+    if authorize is not None:
+        await authorize(session)
     if "endpoint_url" in changes and changes["endpoint_url"] != row.endpoint_url:
         active = await session.scalar(select(TestRun.id).join(
             SchemaSnapshot, SchemaSnapshot.id == TestRun.snapshot_id,
@@ -311,7 +316,8 @@ async def list_schemas(session: AsyncSession, service_id: uuid.UUID) -> list[Sch
 
 
 async def create_run(
-    session: AsyncSession, snapshot_id: uuid.UUID, name: str, metadata: dict
+    session: AsyncSession, snapshot_id: uuid.UUID, name: str, metadata: dict,
+    *, include_metadata: bool = True,
 ) -> RunOut:
     service = await session.scalar(select(GraphQLService).join(
         SchemaSnapshot, SchemaSnapshot.service_id == GraphQLService.id,
@@ -331,7 +337,7 @@ async def create_run(
         await session.rollback()
         raise ConflictError("A run is already active for this schema snapshot") from exc
     await session.refresh(row)
-    return run_out(row)
+    return run_out(row, include_metadata=include_metadata)
 
 
 async def list_runs(
@@ -342,7 +348,7 @@ async def list_runs(
     return rows
 
 
-async def finish_run(session: AsyncSession, run_id: uuid.UUID) -> RunOut:
+async def finish_run(session: AsyncSession, run_id: uuid.UUID, *, include_metadata: bool = True) -> RunOut:
     # Row locking also prevents a concurrent request from recording after completion.
     run = await session.scalar(select(TestRun).where(TestRun.id == run_id).with_for_update())
     if run is None:
@@ -353,7 +359,7 @@ async def finish_run(session: AsyncSession, run_id: uuid.UUID) -> RunOut:
     run.finished_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(run)
-    return run_out(run)
+    return run_out(run, include_metadata=include_metadata)
 
 
 async def record_observation(session: AsyncSession, observation: RequestObservationInput) -> uuid.UUID:

@@ -142,6 +142,12 @@ decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
 
 Если запись после upstream не удалась, ответ — 502 с предупреждением, что upstream
 уже мог выполнить запрос. Автоматически повторять mutation нельзя.
+Проверка cookie session и preflight run/snapshot/service освобождают соединения
+PostgreSQL до DNS, чтения тела и upstream HTTP. После ответа наблюдение сохраняется
+в новой транзакции с прежней блокировкой run относительно `finish`.
+Полные имена GraphQL-операций сохраняются как `TEXT` и точно фильтруются в журнале,
+включая имена длиннее 255 символов. Требуется миграция
+`20261119_operation_name_text`; [проверки и ограничение downgrade](docs/stage6-audit-report.md).
 Подробный контракт, порядок подключения и оставшиеся зависимости:
 [docs/e2e-integration.md](docs/e2e-integration.md).
 
@@ -169,6 +175,9 @@ headers не пересылаются. Только доверенный CLI б�
 HTTPS:443 обязателен по умолчанию. URL без credentials/query/fragment проверяется
 при сохранении и перед соединением. Все DNS-ответы должны быть безопасны;
 сокет закреплён за проверенным числовым IP, TLS проверяет исходный hostname.
+`POST /api/services` и `PATCH /api/services/{id}` освобождают соединения БД
+до DNS. Перед записью повторно проверяются cookie session, роль и grant;
+PATCH делает это под блокировкой сервиса и повторно проверяет активные runs.
 Redirects, environment proxies и автоматические retries выключены.
 Лимиты: request 1 МиБ, response 8 МиБ, анализ decoded response 1 МиБ,
 DNS 3 с, чтение входящего тела 10 с, upstream обмен 30 с, 16 обменов на worker.

@@ -42,12 +42,13 @@ Session = Depends(get_session)
 
 async def introspection_principal(request: Request, sessions=Depends(get_session_factory)) -> Principal:
     # Authentication must also release its connection before the endpoint waits
-    # on HTTP. The ordinary request-scoped get_session dependency cannot do so.
+    # on DNS/HTTP. The ordinary request-scoped get_session dependency cannot do so.
     async with sessions() as session:
         return await current_principal(request, session)
 
 
 require_introspection_operator = require_role("operator", principal_dependency=introspection_principal)
+require_service_operator = require_role("operator", principal_dependency=introspection_principal)
 
 
 def api_errors(exc: Exception) -> HTTPException:
@@ -61,13 +62,18 @@ def api_errors(exc: Exception) -> HTTPException:
 @router.post(
     "/services", status_code=201, response_model=ServiceOut,
 )
-async def post_service(payload: ServiceCreate, session: AsyncSession = Session,
-                       principal: Principal = Depends(require_operator)):
+async def post_service(payload: ServiceCreate, request: Request, sessions=Depends(get_session_factory),
+                       principal: Principal = Depends(require_service_operator)):
     try:
         destination = await validate_endpoint(payload.endpoint_url)
-        return await create_service(session, payload.key, payload.name, payload.is_public,
-                                    owner_id=principal.user_id, endpoint_url=str(destination.url),
-                                    description=payload.description)
+        async with sessions() as session:
+            # DNS may outlive a cookie session or its operator role. Authorize
+            # the write using fresh state, in the transaction that creates it.
+            principal = await current_principal(request, session)
+            await require_operator(request, principal=principal)
+            return await create_service(session, payload.key, payload.name, payload.is_public,
+                                        owner_id=principal.user_id, endpoint_url=str(destination.url),
+                                        description=payload.description)
     except UnsafeEndpoint:
         raise HTTPException(status_code=422, detail="Endpoint is not permitted by the outbound security policy") from None
     except ConflictError as exc:
@@ -103,15 +109,24 @@ async def get_service_detail(service_id: uuid.UUID, session: AsyncSession = Sess
     "/services/{service_id}", response_model=ServiceOut,
 )
 async def patch_service(
-    service_id: uuid.UUID, payload: ServiceUpdate, session: AsyncSession = Session,
-    principal: Principal = Depends(require_operator),
+    service_id: uuid.UUID, payload: ServiceUpdate, request: Request, sessions=Depends(get_session_factory),
+    principal: Principal = Depends(require_service_operator),
 ):
+    async def authorize(session: AsyncSession):
+        current = await current_principal(request, session)
+        await require_operator(request, principal=current)
+        await ensure_visible_service(session, service_id, require_grant=True, **visibility_kwargs(current))
+
     try:
-        await ensure_visible_service(session, service_id, require_grant=True, **visibility_kwargs(principal))
+        async with sessions() as session:
+            await ensure_visible_service(session, service_id, require_grant=True, **visibility_kwargs(principal))
         changes = payload.model_dump(exclude_unset=True)
         if "endpoint_url" in changes:
             changes["endpoint_url"] = str((await validate_endpoint(changes["endpoint_url"])).url)
-        return await update_service(session, service_id, changes)
+        async with sessions() as session:
+            # update_service reauthorizes after acquiring FOR UPDATE, so lock
+            # waits cannot make the permission check stale before the write.
+            return await update_service(session, service_id, changes, authorize=authorize)
     except UnsafeEndpoint:
         raise HTTPException(status_code=422, detail="Endpoint is not permitted by the outbound security policy") from None
     except (NotFoundError, ConflictError) as exc:
@@ -234,7 +249,8 @@ async def post_run(payload: RunCreate, session: AsyncSession = Session,
     try:
         if not principal.admin:
             await ensure_visible_snapshot(session, payload.snapshot_id, require_grant=True, **visibility_kwargs(principal))
-        return await create_run(session, payload.snapshot_id, payload.name, payload.metadata)
+        return await create_run(session, payload.snapshot_id, payload.name, payload.metadata,
+                                include_metadata=principal.admin)
     except (NotFoundError, ConflictError) as exc:
         raise api_errors(exc) from exc
 
@@ -266,7 +282,7 @@ async def post_finish_run(run_id: uuid.UUID, session: AsyncSession = Session,
     try:
         if not principal.admin:
             await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
-        return await finish_run(session, run_id)
+        return await finish_run(session, run_id, include_metadata=principal.admin)
     except (NotFoundError, ConflictError) as exc:
         raise api_errors(exc) from exc
 

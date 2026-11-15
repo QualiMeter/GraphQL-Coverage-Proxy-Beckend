@@ -10,10 +10,10 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access import require_operator
-from app.auth import Principal, visibility_kwargs
+from app.access import require_role
+from app.auth import Principal, current_principal, visibility_kwargs
 from app.config import target_graphql_url
-from app.database import SessionFactory
+from app.database import SessionFactory, get_session_factory
 from app.e2e_capture import capture_e2e_exchange, load_run_snapshot
 from app.services import ConflictError, NotFoundError, ensure_visible_run
 from app.models import GraphQLService
@@ -40,6 +40,16 @@ async def get_proxy_session(request: Request) -> AsyncIterator[AsyncSession | No
         return
     async with SessionFactory() as session:
         yield session
+
+
+async def proxy_principal(request: Request, sessions=Depends(get_session_factory)) -> Principal:
+    # Cookie authentication has its own short read transaction. A request-scoped
+    # auth session would otherwise retain a second checkout throughout HTTP.
+    async with sessions() as session:
+        return await current_principal(request, session)
+
+
+require_proxy_operator = require_role("operator", principal_dependency=proxy_principal)
 
 
 def coverage_run_id(request: Request) -> uuid.UUID | None:
@@ -138,7 +148,7 @@ def trusted_e2e_cookies(request: Request, principal: Principal) -> bool:
     description="Routes through run → snapshot → service.endpointUrl. Original body is forwarded unchanged. "
                 "Browser cookies and internal coverage headers are stripped. No redirects or automatic retries.")
 async def graphql_proxy(request: Request, session: AsyncSession | None = Depends(get_proxy_session),
-                        principal: Principal = Depends(require_operator)):
+                        principal: Principal = Depends(require_proxy_operator)):
     run_id = coverage_run_id(request)
     analyzer = None
     if run_id is None and (not trusted_e2e_cookies(request, principal) or not legacy_enabled()):
@@ -156,6 +166,11 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
             if service is None:
                 raise NotFoundError("GraphQL service not found")
             target_url = service.endpoint_url
+            # End the read transaction and release the checkout before DNS,
+            # request body reads or upstream HTTP. AsyncSession.close() resets
+            # this session; capture below starts a new transaction and still
+            # checks/locks the run in record_observation against finish_run.
+            await session.close()
         except NotFoundError:
             raise HTTPException(status_code=404, detail="Coverage run or schema snapshot not found") from None
         except ConflictError:
