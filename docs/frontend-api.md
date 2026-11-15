@@ -61,7 +61,7 @@ Browser session использует HttpOnly cookie и CSRF, см. [контр�
 | 4 | `GET /api/schemas?serviceId={uuid}` | Публичный UI: версии схемы опубликованного сервиса |
 | 5 | `GET /api/schemas/{schemaId}/graph` | Публичный UI: карта схемы до результатов тестов |
 | 6 | `POST /api/runs` | Operator/admin session + grant или CLI key |
-| 7 | `GET /api/runs?snapshotId={uuid}` | Публичный UI: прогоны опубликованного сервиса |
+| 7 | `GET /api/runs?snapshotId={uuid}` или `?serviceId={uuid}` | История с фильтрами, RunOut[] + X-Total-Count, ACL сервиса |
 | 8 | `GET /api/runs/{runId}/coverage` | Публичный UI: карта и метрики покрытия |
 | 9 | `GET /api/runs/{runId}/requests?limit=100&offset=0` | Analyst/operator session + grant или admin/CLI key |
 | 10 | `POST /api/runs/{runId}/finish` | Operator/admin session + grant или CLI key |
@@ -69,6 +69,7 @@ Browser session использует HttpOnly cookie и CSRF, см. [контр�
 | 12 | `POST /api/schemas/import/introspection` | Operator/admin session + grant или CLI key |
 | 13 | `GET /api/runs/{runId}/operations` | Публичный UI: агрегаты операций опубликованного сервиса |
 | 14 | `GET /api/runs/{runId}/stats` | Публичный UI: статистика и временная шкала прогона |
+| 15 | `GET /api/runs/{runId}/requests/{requestId}` | Analyst/operator с grant либо admin/CLI; безопасный detail |
 
 Для первой интеграции с реальным API достаточно GET-маршрутов 1, 4, 5, 7 и 8.
 
@@ -219,6 +220,13 @@ source/introspection metadata без изменения IDs полей, runs и 
 Один снимок схемы может иметь только один активный прогон одновременно.
 Исторических завершённых прогонов может быть сколько угодно.
 
+`GET /api/runs` принимает ровно один `snapshotId` либо `serviceId` (все snapshots
+сервиса), фильтры `status`, UTC `[from,to)`, `limit` 1–500 и `offset` ≥ 0.
+Без limit возвращаются **все** совпадения, сохраняя старый snapshotId-клиент.
+Ответ RunOut[] и `X-Total-Count` до pagination; порядок startedAt DESC/id DESC.
+metadata — только admin/CLI, остальным `{}`. Недоступная история — 404 без total.
+[Полный контракт этапа 4, DTO и примеры](frontend-history-requests.md).
+
 ## 7. Покрытие, поля и связи для карты
 
 `GET /api/runs/{runId}/coverage`
@@ -328,9 +336,26 @@ source/introspection metadata без изменения IDs полей, runs и 
 
 `GET /api/runs/{runId}/requests?limit=100&offset=0`
 
-**Только с административным ключом.** Публичный UI не должен вызывать этот
-маршрут: без ключа он возвращает `401`.
-Для доверенного клиента возвращается массив (сортировка от новых к старым):
+Analyst/operator с grant к сервису либо admin/доверенный CLI. Публичность сервиса
+не открывает журнал: anonymous — 401, viewer — 403, отсутствующий grant — 404.
+API key в браузер не передаётся. Возвращается RequestOut[] и `X-Total-Count`.
+Добавлено `operationKey: string | null`, совпадающее с `/operations`.
+
+Фильтры: operationKey, case-sensitive operationName, operationType, typeName,
+fieldName (только вместе с typeName), analysisStatus, graphqlHasErrors, httpStatus,
+httpStatusClass (1–5), UTC from/to `[from,to)`. Все соединяются AND.
+sortBy=createdAt|durationMs, sortOrder=asc|desc; defaults createdAt/desc.
+id — tie-breaker в том же направлении, duration null всегда в конце.
+limit 1–500 (default 100), offset ≥ 0. SQL EXISTS исключает дубли полей.
+
+Новый `GET /api/runs/{runId}/requests/{requestId}` возвращает все поля RequestOut,
+countedInCoverage (`success AND responseHasData=true`) и уникальные selectedFields
+с typeName/fieldName/returnType из точного snapshot. Чужой request/run — 404.
+Ни raw query, ни AST, variables, cookies или response bodies не добавлены;
+фиктивный GraphQL документ не восстанавливается.
+[Подробности, валидация и примеры detail](frontend-history-requests.md).
+
+Пример списка:
 
 ```json
 [

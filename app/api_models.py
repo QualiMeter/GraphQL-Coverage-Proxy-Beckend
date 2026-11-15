@@ -129,6 +129,7 @@ class CoverageGraph(ApiModel):
 
 
 class RequestOut(ApiModel):
+    operation_key: str | None = Field(default=None, description="Existing operation identity; null when hash or operation type is unknown.")
     id: uuid.UUID
     run_id: uuid.UUID
     operation_name: str | None
@@ -141,6 +142,17 @@ class RequestOut(ApiModel):
     duration_ms: int | None
     error_code: str | None
     created_at: datetime
+
+
+class SelectedFieldOut(ApiModel):
+    type_name: str
+    field_name: str
+    return_type: str | None
+
+
+class RequestDetailOut(RequestOut):
+    counted_in_coverage: bool
+    selected_fields: list[SelectedFieldOut]
 
 
 class OperationFieldOut(ApiModel):

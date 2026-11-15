@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    event,
     Boolean,
     CheckConstraint,
     ForeignKey,
@@ -85,6 +86,7 @@ class SchemaField(Base):
 class TestRun(Base):
     __tablename__ = "test_runs"
     __table_args__ = (
+        Index("ix_test_runs_snapshot_started_id", "snapshot_id", "started_at", "id"),
         CheckConstraint("status IN ('running', 'completed', 'failed')", name="valid_status"),
         Index(
             "uq_test_runs_running_snapshot", "snapshot_id", unique=True,
@@ -108,6 +110,10 @@ class TestRun(Base):
 class ObservedRequest(Base):
     __tablename__ = "observed_requests"
     __table_args__ = (
+        Index("ix_requests_run_created_id", "run_id", "created_at", "id"),
+        Index("ix_requests_run_duration_id", "run_id", "duration_ms", "id"),
+        Index("ix_requests_run_operation_key", "run_id", "operation_key", "created_at", "id",
+              postgresql_where=text("operation_key IS NOT NULL")),
         CheckConstraint(
             "operation_type IS NULL OR operation_type IN ('query', 'mutation', 'subscription')",
             name="valid_operation_type",
@@ -126,6 +132,7 @@ class ObservedRequest(Base):
     )
     operation_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     operation_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    operation_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     query_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     http_method: Mapped[str] = mapped_column(String(10), nullable=False)
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -135,6 +142,18 @@ class ObservedRequest(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+@event.listens_for(ObservedRequest, "before_insert")
+@event.listens_for(ObservedRequest, "before_update")
+def update_operation_key(mapper, connection, row):
+    # All application observation writes use the ORM. Keep the indexed identity
+    # in sync even when historical metadata is edited through that API.
+    from app.operation_identity import operation_key
+    row.operation_key = (
+        operation_key(row.query_hash, row.operation_name, row.operation_type)
+        if row.query_hash is not None and row.operation_type is not None else None
+    )
 
 
 class RequestFieldUsage(Base):

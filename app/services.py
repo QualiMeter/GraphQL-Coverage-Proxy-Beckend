@@ -316,11 +316,9 @@ async def create_run(
 async def list_runs(
     session: AsyncSession, snapshot_id: uuid.UUID, *, include_metadata: bool = True
 ) -> list[RunOut]:
-    rows = (await session.scalars(
-        select(TestRun).where(TestRun.snapshot_id == snapshot_id)
-        .order_by(TestRun.started_at.desc())
-    )).all()
-    return [run_out(row, include_metadata=include_metadata) for row in rows]
+    from app.journal import RunFilters, list_run_page
+    rows, _ = await list_run_page(session, RunFilters(snapshot_id=snapshot_id), include_metadata=include_metadata)
+    return rows
 
 
 async def finish_run(session: AsyncSession, run_id: uuid.UUID) -> RunOut:
@@ -488,18 +486,6 @@ async def get_run_graph(session: AsyncSession, run_id: uuid.UUID) -> CoverageGra
 async def list_requests(
     session: AsyncSession, run_id: uuid.UUID, limit: int, offset: int
 ) -> list[RequestOut]:
-    if await session.get(TestRun, run_id) is None:
-        raise NotFoundError("Test run not found")
-    rows = (await session.scalars(
-        select(ObservedRequest).where(ObservedRequest.run_id == run_id)
-        .order_by(ObservedRequest.created_at.desc(), ObservedRequest.id.desc())
-        .limit(limit).offset(offset)
-    )).all()
-    return [RequestOut(
-        id=row.id, run_id=row.run_id, operation_name=row.operation_name,
-        operation_type=row.operation_type, http_method=row.http_method,
-        http_status=row.http_status, analysis_status=row.analysis_status,
-        response_has_data=row.response_has_data,
-        graphql_has_errors=row.graphql_has_errors,
-        duration_ms=row.duration_ms, error_code=row.error_code, created_at=row.created_at,
-    ) for row in rows]
+    from app.journal import RequestFilters, list_request_page
+    rows, _ = await list_request_page(session, run_id, RequestFilters(limit=limit, offset=offset))
+    return rows

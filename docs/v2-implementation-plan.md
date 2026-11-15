@@ -91,3 +91,28 @@ fetch отклоняет запись, конкурентные SDL/introspectio
 [Frontend delta](frontend-introspection.md), [архитектура/лимиты/upstream auth](service-introspection.md).
 SDL download/displayName/расширенные schema DTO, история и P1-аналитика остаются
 последующими работами; P2 не начат.
+
+
+## Этап 4: история и журнал обращений — реализовано для ревью
+
+База main `979c5f9b9078834a92261b53fdc28e9fdff87916` (принятый PR #25),
+ветка `codex/v2-history-requests`. История ровно по serviceId/snapshotId,
+UTC/status filters, стабильная SQL pagination, X-Total-Count, без скрытого limit
+для старых клиентов. Request journal: типизированные AND-фильтры, snapshot-scoped
+EXISTS, operationKey, count, NULLS LAST, detail с реальными selectedFields и
+countedInCoverage. ACL и закрытые metadata сохранены; агрегаты/coverage не менялись.
+Additive migration `20261117_history_journal`: nullable материализованный ключ по
+**прежней** формуле, backfill исторических записей bounded batches, четыре индекса.
+[Frontend контракт и эксплуатационные ограничения](frontend-history-requests.md).
+
+PostgreSQL-тесты проверяют несколько snapshots/сервисов, legacy DTO/pagination,
+UTC-границы, одинаковые timestamps, operation identities, отсутствие дублей,
+чужие requestId/snapshot fields, все роли и отзыв прав, миграцию с 1004 записями.
+Merge/deploy выполняет заказчик после ревью; production deploy не включался.
+
+На этап 5 остаются analysisStatusCounts/P95 и безопасная копия реального AST с
+маскированием литералов/defaults/fragments/directives и проверкой отсутствия секретов.
+Ранее отложенные schema DTO/SDL download/displayName из полного ТЗ не объявляются
+завершёнными: их нужно явно включить в согласованный остаток P0/P1 на этапах 5–6.
+Этап 6 — итоговый аудит P0/P1, сквозные проверки и окончательная документация.
+P2 не начат. Переход к этапу 5 только после ревью и принятия этапа 4.
