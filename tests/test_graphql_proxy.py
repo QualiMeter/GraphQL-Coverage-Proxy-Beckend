@@ -5,15 +5,21 @@ import httpx
 import pytest
 
 from app.main import app
+from app.upstream import PinnedTransport
 
 
-TARGET = "https://upstream.example/api/graphql?tenant=demo"
+TARGET = "https://upstream.example/api/graphql"
 TEST_ADMIN_KEY = "test-only-coverage-admin-key-" + "a" * 40
 
 
 @pytest.fixture
 def upstream(monkeypatch):
     monkeypatch.setenv("TARGET_GRAPHQL_URL", TARGET)
+    monkeypatch.setenv("COVERAGE_LEGACY_PROXY", "true")
+    import asyncio
+    async def dns(self, host, port, **kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", dns)
     requests = []
 
     def install(handler):
@@ -24,7 +30,7 @@ def upstream(monkeypatch):
             return await transport.handle_async_request(request)
 
         # Replace only network I/O; exercise the production AsyncClient and route.
-        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_request)
+        monkeypatch.setattr(PinnedTransport, "handle_async_request", handle_request)
         return requests
 
     return install
@@ -163,10 +169,10 @@ async def test_does_not_follow_redirects(client, upstream):
 
 
 @pytest.mark.parametrize("error,status,detail", [
-    (httpx.ConnectTimeout, 504, "GraphQL upstream timed out"),
-    (httpx.ReadTimeout, 504, "GraphQL upstream timed out"),
-    (httpx.ConnectError, 502, "GraphQL upstream request failed"),
-    (httpx.RemoteProtocolError, 502, "GraphQL upstream request failed"),
+    (httpx.ConnectTimeout, 504, "GraphQL upstream timed out; upstream may have executed the request. Do not retry automatically."),
+    (httpx.ReadTimeout, 504, "GraphQL upstream timed out; upstream may have executed the request. Do not retry automatically."),
+    (httpx.ConnectError, 502, "GraphQL upstream request failed; upstream may have executed the request. Do not retry automatically."),
+    (httpx.RemoteProtocolError, 502, "GraphQL upstream request failed; upstream may have executed the request. Do not retry automatically."),
 ])
 async def test_gateway_errors_do_not_expose_details(error, status, detail, client, upstream, caplog):
     def fail(request):
@@ -189,7 +195,7 @@ async def test_timeout_while_reading_response_returns_504(client, upstream):
     upstream(lambda request: httpx.Response(200, stream=InterruptedBody()))
     response = await client.post("/graphql", content=b"{}")
     assert response.status_code == 504
-    assert response.json() == {"detail": "GraphQL upstream timed out"}
+    assert response.json() == {"detail": "GraphQL upstream timed out; upstream may have executed the request. Do not retry automatically."}
 
 
 @pytest.mark.parametrize("target", [None, "", "  ", "not-a-url", "ftp://upstream.example", "https://upstream.example:invalid"])
@@ -201,7 +207,7 @@ async def test_missing_or_invalid_config_only_disables_proxy(target, client, ups
         monkeypatch.setenv("TARGET_GRAPHQL_URL", target)
     response = await client.post("/graphql", content=b"{}")
     assert response.status_code == 503
-    assert response.json() == {"detail": "TARGET_GRAPHQL_URL is not configured correctly"}
+    assert response.json() == {"detail": "GraphQL upstream destination is unavailable or not permitted"}
     assert requests == []
     assert (await client.get("/health")).json() == {"status": "ok"}
     assert (await client.get("/openapi.json")).status_code == 200
@@ -245,7 +251,7 @@ async def test_rejects_target_userinfo_without_request_or_secret_logs(
     })
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "TARGET_GRAPHQL_URL is not configured correctly"}
+    assert response.json() == {"detail": "GraphQL upstream destination is unavailable or not permitted"}
     assert len(requests) == 0
     # Boolean aggregation avoids printing captured credentials on assertion failure.
     assert all(value not in caplog.text for value in (

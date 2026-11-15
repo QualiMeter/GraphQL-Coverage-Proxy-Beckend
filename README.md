@@ -29,7 +29,7 @@ CLI/E2E сохраняет серверный API key, браузер испол
 - Подсчёт уникального покрытия полей и числа запросов, затронувших каждое поле.
 - REST API и автоматическая документация Swagger/OpenAPI.
 - Пользователи viewer/analyst/operator/admin, серверные сессии, CSRF, grants, bootstrap CLI.
-- `POST /graphql` — HTTP-прокси на адрес из `TARGET_GRAPHQL_URL`.
+- `POST /graphql` — безопасная маршрутизация run → snapshot → service.endpointUrl.
 - GraphQL AST Analyzer для query/mutation, подключённый к E2E-записи через async-адаптер.
 - Публичные/приватные сервисы (`isPublic`) и API-ключ для изменяющих операций.
 
@@ -128,16 +128,16 @@ decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
   анализа и ссылки на поля из схемы. Ни query, ни variables, ни ответы не сохраняются.
 - Признаки GraphQL-ответа вычисляются по **декодированной копии JSON**.
   Для анализа gzip/deflate распаковываются с пределом 1 МиБ, непроверяемый ответ
-  даёт `None`. Исходные сжатые байты ответа сохраняются.
+  даёт `None`. Клиент получает исходные сжатые байты ответа; в БД они не сохраняются.
 - При падении анализатора записывается `internal_error`, без фиктивного покрытия.
 
 `POST /graphql` вызывает этот модуль при наличии `X-Coverage-Run-Id` и ждёт commit
 перед отправкой исходного ответа. При запуске `app.state.coverage_analyzer`
 получает настоящий `app.analyzer_adapter.analyze_e2e_query`: он компилирует SDL
 снимка и выполняет синхронный `analyze_query()` в worker thread. Схемы кешируются
-с ограничением 32 снимка. Обычный прокси без заголовка работает без обращения к БД.
+с ограничением 32 снимка. CLI proxy без заголовка работает без БД только в явном legacy-режиме.
 Некорректный/неоднозначный UUID даёт 400, неизвестный прогон — 404,
-завершённый — 409. Отсутствие конфигурации `TARGET_GRAPHQL_URL` по-прежнему даёт 503.
+завершённый — 409. Сервис без endpoint даёт 409, если legacy fallback явно не включён.
 
 Если запись после upstream не удалась, ответ — 502 с предупреждением, что upstream
 уже мог выполнить запрос. Автоматически повторять mutation нельзя.
@@ -146,58 +146,53 @@ decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
 
 ## HTTP-прокси GraphQL
 
-Задайте `TARGET_GRAPHQL_URL` в окружении процесса API или в `.env` для Compose
-(Compose передаёт эту переменную контейнеру):
+Создайте отдельный сервис с обязательным `endpointUrl`, импортируйте его SDL и
+создайте run. Прокси выбирает адрес через `X-Coverage-Run-Id → TestRun →
+SchemaSnapshot → GraphQLService.endpoint_url`. Переключать глобальное окружение
+при переключении сервисов не требуется. [Контракт frontend](docs/frontend-multi-service.md)
+и [готовый пример двух сервисов](docs/multi-service-e2e.md).
 
 ```bash
-export TARGET_GRAPHQL_URL=https://your-api.example/graphql
 curl http://localhost:8000/graphql \
   -H 'Content-Type: application/json' \
   -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
-  --data-binary '{"query":"query Health { health }","variables":{},"operationName":"Health"}'
+  -H "X-Coverage-Run-Id: $RUN_ID" \
+  --data-binary '{"query":"query Health { health }"}'
 ```
 
-Прокси передаёт исходные байты тела, `Authorization` и применимые заголовки.
-В browser context любые Cookie и upstream Set-Cookie блокируются. Доверенный
-API-key E2E-клиент без Origin/Sec-Fetch-* сохраняет cookie passthrough; для разных
-сервисов нужны отдельные cookie jars. Внутренние cookies не передаются никогда.
-Hop-by-hop заголовки, указанные в `Connection` заголовки, `X-Coverage-Run-Id`
-и `X-Coverage-Api-Key`
-исключаются; `Host` и `Content-Length` формируются заново. Статус и тело upstream,
-включая 4xx/5xx и сжатие, сохраняются. Upstream Set-Cookie допускается только для
-доверенного API-key E2E-клиента вне browser context. Редиректы не выполняются.
-Адрес upstream задаётся только окружением, HTTP-запрос не может его переопределить.
+Сохраняются исходные байты тела, разрешённые заголовки, статус и тело ответа.
+Browser Cookie/Set-Cookie, внутренние X-Coverage-*, CSRF, forwarding и hop-by-hop
+headers не пересылаются. Только доверенный CLI без Origin/Sec-Fetch-* может
+явно передать upstream cookies; общего cookie jar нет.
 
-При отсутствии или некорректном `TARGET_GRAPHQL_URL` только `/graphql` возвращает
-503; остальные REST API доступны. Сетевые ошибки дают 502, таймаут — 504 без
-внутренних подробностей. Таймаут каждой сетевой операции — 30 секунд.
-Тела запросов, переменные и секреты не сохраняются. При opt-in E2E-записи
-применяется дополнительный контракт ошибок, описанный выше.
+HTTPS:443 обязателен по умолчанию. URL без credentials/query/fragment проверяется
+при сохранении и перед соединением. Все DNS-ответы должны быть безопасны;
+сокет закреплён за проверенным числовым IP, TLS проверяет исходный hostname.
+Redirects, environment proxies и автоматические retries выключены.
+Лимиты: request 1 МиБ, response 8 МиБ, анализ decoded response 1 МиБ,
+DNS 3 с, чтение входящего тела 10 с, upstream обмен 30 с, 16 обменов на worker.
+HTTP/локальные адреса требуют одновременно COVERAGE_DEV_MODE=true и точный
+COVERAGE_DEV_UPSTREAM_ORIGINS. Production Compose dev-режим запрещает.
+[Архитектура и ограничения SSRF](docs/multi-service-security.md).
 
-Ограничения этапа: только HTTP POST; тела запросов и ответов буферизуются в памяти,
-потоковая доставка и WebSocket-подписки не поддержаны.
+Временная совместимость: COVERAGE_LEGACY_PROXY=true разрешает доверенному
+CLI без run ID использовать TARGET_GRAPHQL_URL, а старым сервисам с NULL
+endpoint — fallback к нему. Новый configured-сервис всегда использует свой URL.
+Browser всегда требует run ID. Legacy по умолчанию выключен.
+
+Смена endpoint при любом running run сервиса возвращает 409. После завершения
+всех runs endpoint можно изменить, snapshots/наблюдения сохраняются.
+502/504 после отправки могут означать уже выполненную mutation: автоматический
+повтор запрещён. Только HTTP POST; WebSocket и потоковая доставка не поддержаны.
 
 ## Импорт схемы через introspection
 
-Укажите GraphQL endpoint только в серверной переменной `TARGET_GRAPHQL_URL`.
-Для импорта схемы существующего сервиса:
-
-```bash
-curl -i http://localhost:8000/api/schemas/import/introspection \
-  -H 'Content-Type: application/json' \
-  -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
-  -d '{"serviceId":"<UUID созданного сервиса>"}'
-```
-
-Ответ — `201 Created` и `SchemaOut` с `source: "introspection"`.
-Повторный импорт идентичной схемы использует существующий snapshot.
-Адрес upstream нельзя передать в JSON (все лишние поля отвергаются с 422).
-Отсутствующая или некорректная конфигурация даёт 503, недоступный upstream
-или невалидная introspection-схема — 502, неизвестный serviceId — 404.
-
-Collector пока не передаёт пользовательские Bearer-токены на upstream.
-Импорт схемы, как и другие административные операции, требует
-`X-Coverage-Api-Key`. Ключ нельзя хранить в публичном фронтенде.
+Introspection выбранного сервиса — этап 3. Пока сервисы с endpointUrl получают
+409 на `/api/schemas/import/introspection`; используйте `/api/schemas/import`
+с реальным SDL. Это предотвращает импорт глобальной схемы в чужой сервис.
+Для исторических сервисов с NULL endpoint старый путь доступен только при
+COVERAGE_LEGACY_PROXY=true и TARGET_GRAPHQL_URL с SSRF-защитой. URL в JSON
+не принимается. Права operator/admin + grant, cookie/CSRF или доверенный CLI key.
 
 ## Обращение фронтенда
 

@@ -26,6 +26,11 @@ TEST_ADMIN_KEY = "test-only-coverage-admin-key-" + "a" * 40
 @pytest.fixture(autouse=True)
 def configured_admin_key(monkeypatch):
     monkeypatch.setenv("COVERAGE_API_KEY", TEST_ADMIN_KEY)
+    monkeypatch.setenv("COVERAGE_LEGACY_PROXY", "true")
+    from types import SimpleNamespace
+    async def get_service(*args, **kwargs):
+        return SimpleNamespace(endpoint_url=None)
+    monkeypatch.setattr(api, "get_service", get_service)
 
 
 def test_introspection_route_uses_config_only_and_returns_snapshot(monkeypatch):

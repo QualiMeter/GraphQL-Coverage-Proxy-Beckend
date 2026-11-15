@@ -13,6 +13,7 @@ from app.auth import bootstrap_admin, hash_password, token_hash
 from app.auth_models import BrowserSession, LoginThrottle, ServiceGrant, User
 from app.database import get_session
 from app.main import app
+from app.upstream import PinnedTransport
 from app.services import create_run, create_service, import_sdl
 from test_postgres_integration import postgres_session  # noqa: F401
 
@@ -37,8 +38,8 @@ async def auth_context(postgres_session, monkeypatch):
         postgres_session.add(user)
         users[role] = user
     await postgres_session.commit()
-    private = await create_service(postgres_session, "private-" + uuid.uuid4().hex, "Private")
-    public = await create_service(postgres_session, "public-" + uuid.uuid4().hex, "Public", True)
+    private = await create_service(postgres_session, "private-" + uuid.uuid4().hex, "Private", endpoint_url="https://93.184.216.34/a")
+    public = await create_service(postgres_session, "public-" + uuid.uuid4().hex, "Public", True, endpoint_url="https://93.184.216.35/b")
     private_schema = await import_sdl(postgres_session, private.id, "type Query { privateField: String }")
     public_schema = await import_sdl(postgres_session, public.id, "type Query { publicField: String }")
     private_run = await create_run(postgres_session, private_schema.id, "private", {})
@@ -129,17 +130,17 @@ async def test_csrf_all_write_routes_and_operator_creation_grants(auth_context, 
     client, users, private, public, private_schema, public_schema, private_run, public_run = auth_context
     headers, _ = await login(client)
     for method, path, payload in [
-        ("POST", "/api/services", {"key": "fresh", "name": "Fresh"}),
+        ("POST", "/api/services", {"key": "fresh", "name": "Fresh", "endpointUrl": "https://93.184.216.34/graphql"}),
         ("PATCH", f"/api/services/{private.id}", {"isPublic": True}),
         ("POST", "/api/schemas/import", {"serviceId": str(private.id), "sdl": "type Query { x: Int }"}),
         ("POST", "/api/schemas/import/introspection", {"serviceId": str(private.id)}),
-        ("POST", "/api/runs", {"snapshotId": str(public_schema.id), "name": "Fresh"}),
+        ("POST", "/api/runs", {"snapshotId": str(public_schema.id), "name": "Fresh", "endpointUrl": "https://93.184.216.34/graphql"}),
         ("POST", f"/api/runs/{public_run.id}/finish", {}),
         ("POST", "/graphql", {"query": "{ x }"}),
     ]:
         for bad_headers in ({}, {"Origin": ORIGIN}, {"Origin": "https://attacker.test", "X-CSRF-Token": headers["X-CSRF-Token"]}):
             assert (await client.request(method, path, json=payload, headers=bad_headers)).status_code == 403
-    response = await client.post("/api/services", json={"key": "fresh", "name": "Fresh"}, headers=headers)
+    response = await client.post("/api/services", json={"key": "fresh", "name": "Fresh", "endpointUrl": "https://93.184.216.34/graphql"}, headers=headers)
     assert response.status_code == 201
     service_id = uuid.UUID(response.json()["id"])
     assert await postgres_session.get(ServiceGrant, (users["operator"].id, service_id)) is not None
@@ -239,7 +240,7 @@ async def test_proxy_browser_acl_csrf_and_cookie_isolation(auth_context, postgre
             (b"Set-Cookie", b"__Host-coverage_session=attacker; Secure; Path=/"),
             (b"Set-Cookie", b"upstream_cookie=okay; Secure; Path=/"),
         ])
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", upstream)
+    monkeypatch.setattr(PinnedTransport, "handle_async_request", upstream)
     run_headers = {**headers, "X-Coverage-Run-Id": str(private_run.id)}
     body = b'{"query":"{ privateField }"}'
     assert (await client.post("/graphql", content=body, headers=run_headers)).status_code == 404
@@ -309,12 +310,10 @@ async def test_browser_cookies_cannot_cross_service_boundary(auth_context, postg
             ("Set-Cookie", "upstream_session=from-service-a; Path=/"),
             ("Set-Cookie", "__Host-coverage_session=attacker; Secure; Path=/"),
         ])
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", upstream)
-    # Stage 2 will resolve these targets by service; here exercise the cookie
-    # boundary across two real service/run contexts with different destinations.
-    for run, target in ((private_run, "https://service-a.example/graphql"),
-                        (public_run, "https://service-b.example/graphql")):
-        monkeypatch.setenv("TARGET_GRAPHQL_URL", target)
+    monkeypatch.setattr(PinnedTransport, "handle_async_request", upstream)
+    # Saved service endpoints determine routing; the global target is irrelevant.
+    monkeypatch.setenv("TARGET_GRAPHQL_URL", "https://wrong-service.example/graphql")
+    for run in (private_run, public_run):
         wire_headers = [*headers.items(), ("X-Coverage-Run-Id", str(run.id)),
                         ("Cookie", f"__Host-coverage_session={token}; portal_session=portal-secret"),
                         ("Cookie", "other_app_session=other-app-secret; upstream_session=service-a-secret")]
@@ -322,7 +321,7 @@ async def test_browser_cookies_cannot_cross_service_boundary(auth_context, postg
         assert response.status_code == 200
         assert "set-cookie" not in response.headers
     assert len(calls) == 2
-    assert calls[0].url.host == "service-a.example" and calls[1].url.host == "service-b.example"
+    assert calls[0].url.host == "93.184.216.34" and calls[1].url.host == "93.184.216.35"
     assert all("cookie" not in call.headers for call in calls)
     assert client.cookies.get("__Host-coverage_session") == token
     assert client.cookies.get("portal_session") is None
@@ -348,7 +347,7 @@ async def test_login_csrf_and_logout_through_production_uvicorn_proxy(auth_conte
         # sends to Nginx, rather than relaxing the client's Secure cookie rules.
         cookie = response.headers["set-cookie"].split(";", 1)[0]
         write_headers = {**headers, "Cookie": cookie, "X-CSRF-Token": response.json()["csrfToken"]}
-        result = await proxied.post("/api/services", json={"key": "proxied-auth", "name": "Proxied"}, headers=write_headers)
+        result = await proxied.post("/api/services", json={"key": "proxied-auth", "name": "Proxied", "endpointUrl": "https://93.184.216.34/graphql"}, headers=write_headers)
         assert result.status_code == 201
         assert (await proxied.post("/api/auth/logout", headers={**headers, "Cookie": cookie})).status_code == 403
         assert (await proxied.post("/api/auth/logout", headers=write_headers)).status_code == 204

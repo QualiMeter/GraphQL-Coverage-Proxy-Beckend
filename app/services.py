@@ -33,10 +33,11 @@ class InvalidReferenceError(Exception):
     pass
 
 
-def service_out(row: GraphQLService) -> ServiceOut:
+def service_out(row: GraphQLService, *, include_endpoint: bool = True) -> ServiceOut:
     return ServiceOut(
         id=row.id, key=row.key, name=row.name,
-        is_public=row.is_public, created_at=row.created_at,
+        is_public=row.is_public, created_at=row.created_at, updated_at=row.updated_at,
+        description=row.description, endpoint_url=row.endpoint_url if include_endpoint else None,
     )
 
 
@@ -58,12 +59,12 @@ def run_out(row: TestRun, *, include_metadata: bool = True) -> RunOut:
 
 async def create_service(
     session: AsyncSession, key: str, name: str, is_public: bool = False,
-    *, owner_id: uuid.UUID | None = None,
+    *, owner_id: uuid.UUID | None = None, endpoint_url: str | None = None, description: str | None = None,
 ) -> ServiceOut:
     existing = await session.scalar(select(GraphQLService.id).where(GraphQLService.key == key))
     if existing is not None:
         raise ConflictError("A service with that key already exists")
-    row = GraphQLService(key=key, name=name, is_public=is_public)
+    row = GraphQLService(key=key, name=name, is_public=is_public, endpoint_url=endpoint_url, description=description)
     session.add(row)
     try:
         if owner_id is not None:
@@ -77,26 +78,47 @@ async def create_service(
     return service_out(row)
 
 
-async def list_services(session: AsyncSession, *, public_only: bool = False, user_id: uuid.UUID | None = None) -> list[ServiceOut]:
-    stmt = select(GraphQLService).order_by(GraphQLService.name)
+async def list_services(session: AsyncSession, *, public_only: bool = False, user_id: uuid.UUID | None = None, include_endpoint: bool = True) -> list[ServiceOut]:
+    stmt = select(GraphQLService, _visible_service(user_id, require_grant=True)).order_by(GraphQLService.name, GraphQLService.id)
     if public_only:
         stmt = stmt.where(_visible_service(user_id))
-    rows = (await session.scalars(stmt)).all()
-    return [service_out(row) for row in rows]
+    rows = (await session.execute(stmt)).all()
+    return [service_out(row, include_endpoint=include_endpoint and (not public_only or granted))
+            for row, granted in rows]
 
 
-async def change_service_visibility(
-    session: AsyncSession, service_id: uuid.UUID, is_public: bool
-) -> ServiceOut:
+async def update_service(session: AsyncSession, service_id: uuid.UUID, changes: dict) -> ServiceOut:
+    # All run creation and endpoint updates lock the same service row. This is
+    # necessary even when the active run belongs to a different snapshot.
     row = await session.scalar(
         select(GraphQLService).where(GraphQLService.id == service_id).with_for_update()
+        .execution_options(populate_existing=True)
     )
     if row is None:
         raise NotFoundError("GraphQL service not found")
-    row.is_public = is_public
+    if "endpoint_url" in changes and changes["endpoint_url"] != row.endpoint_url:
+        active = await session.scalar(select(TestRun.id).join(
+            SchemaSnapshot, SchemaSnapshot.id == TestRun.snapshot_id,
+        ).where(SchemaSnapshot.service_id == service_id, TestRun.status == "running").limit(1))
+        if active is not None:
+            raise ConflictError("Endpoint cannot change while the service has an active run")
+    for key, value in changes.items():
+        setattr(row, key, value)
+    row.updated_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(row)
     return service_out(row)
+
+
+async def change_service_visibility(session: AsyncSession, service_id: uuid.UUID, is_public: bool) -> ServiceOut:
+    return await update_service(session, service_id, {"is_public": is_public})
+
+
+async def get_service(session: AsyncSession, service_id: uuid.UUID, *, include_endpoint: bool = True) -> ServiceOut:
+    row = await session.get(GraphQLService, service_id)
+    if row is None:
+        raise NotFoundError("GraphQL service not found")
+    return service_out(row, include_endpoint=include_endpoint)
 
 
 def _visible_service(user_id: uuid.UUID | None, *, require_grant: bool = False):
@@ -247,7 +269,10 @@ async def list_schemas(session: AsyncSession, service_id: uuid.UUID) -> list[Sch
 async def create_run(
     session: AsyncSession, snapshot_id: uuid.UUID, name: str, metadata: dict
 ) -> RunOut:
-    if await session.get(SchemaSnapshot, snapshot_id) is None:
+    service = await session.scalar(select(GraphQLService).join(
+        SchemaSnapshot, SchemaSnapshot.service_id == GraphQLService.id,
+    ).where(SchemaSnapshot.id == snapshot_id).with_for_update(of=GraphQLService))
+    if service is None:
         raise NotFoundError("Schema snapshot not found")
     existing = await session.scalar(
         select(TestRun.id).where(TestRun.snapshot_id == snapshot_id, TestRun.status == "running")

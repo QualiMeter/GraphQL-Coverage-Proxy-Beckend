@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import proxy
 from app.contracts import AnalysisResult
 from app.main import app
-from app.models import SchemaSnapshot, TestRun as Run
+from app.models import GraphQLService, SchemaSnapshot, TestRun as Run
 from test_graphql_proxy import client, raw_response, upstream  # noqa: F401
 
 
@@ -24,11 +24,13 @@ def capture_context(monkeypatch):
     snapshot_id = uuid.uuid4()
     session = AsyncMock(spec=AsyncSession)
     run = SimpleNamespace(id=run_id, snapshot_id=snapshot_id, status="running")
-    snapshot = SimpleNamespace(id=snapshot_id, schema_sdl="type Query { ok: Boolean }")
+    snapshot = SimpleNamespace(id=snapshot_id, service_id=uuid.uuid4(), schema_sdl="type Query { ok: Boolean }")
 
     async def get(model, key, **kwargs):
         if model is Run:
             return run if key == run_id else None
+        if model is GraphQLService:
+            return SimpleNamespace(endpoint_url=None)
         assert model is SchemaSnapshot
         assert key == snapshot_id
         return snapshot

@@ -63,3 +63,19 @@ HTTP/GraphQL-ошибки эту семантику не заменяют. Су�
   безопасной обработки — `documentAvailability: unavailable`.
   query_hash/operationKey не меняются. Никакого восстановления query из selectedFields.
 - Сравнение прогонов, P50/P99, HTTP-распределения и error timeline — P2, позже.
+
+## Этап 2: фактическая база и граница PR
+
+После принятия #23 база — main `bf9cdb2cdbcbdc7d7fd2f4e41b10ea8f910c641a`,
+ветка `codex/v2-multi-service`. Реализованы endpoint CRUD, nullable-миграция,
+service lock для run create / endpoint update, pinned DNS transport, явный
+legacy fallback, limits и multi-service PostgreSQL/TCP проверки.
+PR #22 остаётся открытым с тем же HEAD `638d14838ee54e5ef2825179ba3d16d9adea22db`;
+его контрольный тест отдельно проходит поверх этапа 2, не дублируется в ветке.
+
+Introspection выбранного endpoint относится к этапу 3. Чтобы глобальная схема
+не попала в configured-сервис до этого этапа, маршрут временно возвращает 409
+и предлагает SDL. Старый путь доступен только explicit legacy mode и использует
+общую SSRF-защиту. Остальные история/аналитика/P95/безопасный AST и P2 не добавлялись.
+[Frontend delta](frontend-multi-service.md), [SSRF](multi-service-security.md),
+[E2E](multi-service-e2e.md), [будущий release](../deploy/STAGE2-RELEASE.md).

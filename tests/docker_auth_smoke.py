@@ -105,7 +105,7 @@ http {{
                 assert response.status_code == 200, "TLS scheme did not survive the Nginx/Docker hop"
                 assert "Secure" in response.headers["set-cookie"] and "HttpOnly" in response.headers["set-cookie"]
                 csrf = response.json()["csrfToken"]
-                response = browser.post("/api/services", json={"key": "auth-smoke", "name": "Auth smoke"}, headers={"X-CSRF-Token": csrf})
+                response = browser.post("/api/services", json={"key": "auth-smoke", "name": "Auth smoke", "endpointUrl": "https://93.184.216.34/graphql"}, headers={"X-CSRF-Token": csrf})
                 assert response.status_code == 201, "Authenticated CSRF write failed"
                 assert browser.post("/api/auth/logout").status_code == 403
                 assert browser.post("/api/auth/logout", headers={"X-CSRF-Token": csrf, "Origin": "https://attacker.invalid"}).status_code == 403

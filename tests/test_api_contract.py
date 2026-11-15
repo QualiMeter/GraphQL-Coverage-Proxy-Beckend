@@ -36,3 +36,15 @@ def test_frontend_routes_are_documented_by_fastapi():
 def test_health_is_not_mistaken_for_database_health():
     with TestClient(app) as client:
         assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_service_validation_never_echoes_submitted_secrets(monkeypatch):
+    from test_graphql_proxy import TEST_ADMIN_KEY
+    monkeypatch.setenv("COVERAGE_API_KEY", TEST_ADMIN_KEY)
+    with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
+        response = client.post("/api/services", json={"key": "Secret supplied in invalid key", "name": "Test",
+            "endpointUrl": "https://user:private-password@example.com/graphql?token=private-token"})
+        assert response.status_code == 422
+        assert all(secret not in response.text for secret in ("private-password", "private-token", "Secret supplied"))
+        response = client.post("/api/services", content=b"x" * 16_385)
+        assert response.status_code == 413

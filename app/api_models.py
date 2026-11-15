@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 from app.contracts import OperationType
@@ -18,11 +18,24 @@ class ServiceCreate(ApiModel):
     key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z][a-z0-9_-]*$")
     name: str = Field(min_length=1, max_length=255)
     is_public: bool = False
+    endpoint_url: str = Field(min_length=1, max_length=2048)
+    description: str | None = Field(default=None, max_length=2000)
 
 
-class ServiceVisibilityUpdate(ApiModel):
+class ServiceUpdate(ApiModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
-    is_public: bool
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    endpoint_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    is_public: bool | None = None
+
+    @model_validator(mode="after")
+    def valid_update(self):
+        if not self.model_fields_set or any(
+            getattr(self, field) is None for field in self.model_fields_set - {"description"}
+        ):
+            raise ValueError("Provide at least one change; only description may be null")
+        return self
 
 
 class ServiceOut(ApiModel):
@@ -31,6 +44,9 @@ class ServiceOut(ApiModel):
     name: str
     is_public: bool
     created_at: datetime
+    updated_at: datetime
+    endpoint_url: str | None = None
+    description: str | None = None
 
 
 class SchemaImport(ApiModel):

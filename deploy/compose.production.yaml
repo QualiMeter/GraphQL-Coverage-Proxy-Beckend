@@ -25,6 +25,7 @@ services:
       dockerfile: Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?Set POSTGRES_USER in deploy/.env}:${POSTGRES_PASSWORD:?Set a URL-safe POSTGRES_PASSWORD in deploy/.env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in deploy/.env}
+      COVERAGE_LEGACY_PROXY: ${COVERAGE_LEGACY_PROXY:-false}
       TARGET_GRAPHQL_URL: ${TARGET_GRAPHQL_URL:-}
       COVERAGE_API_KEY: ${COVERAGE_API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
