@@ -1,5 +1,3 @@
-"""Transparent HTTP proxy with opt-in, synchronous E2E observation capture."""
-
 import asyncio
 import time
 import uuid
@@ -98,7 +96,6 @@ def decoded_response_copy(content: bytes, headers: httpx.Headers) -> bytes | Non
 def forwarded_headers(
     headers: httpx.Headers, *, strip_forwarding: bool = False, allow_cookies: bool = False,
 ) -> list[tuple[bytes, bytes]]:
-    """Cookies are denied unless the caller selected trusted, non-browser E2E mode."""
     excluded = EXCLUDED_HEADERS | {
         token.strip().lower()
         for value in headers.get_list("connection")

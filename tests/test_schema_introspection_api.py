@@ -1,4 +1,3 @@
-"""HTTP contract: service ID only; stable sanitized introspection errors."""
 import uuid
 from datetime import datetime, timezone
 

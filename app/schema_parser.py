@@ -1,5 +1,3 @@
-"""Pure GraphQL schema import logic, without database access."""
-
 import hashlib
 from dataclasses import dataclass
 

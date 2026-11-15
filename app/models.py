@@ -1,5 +1,3 @@
-"""Persisted domain entities. Only masked query AST copies are stored; raw queries/variables never are."""
-
 import uuid
 from datetime import datetime
 from typing import Any

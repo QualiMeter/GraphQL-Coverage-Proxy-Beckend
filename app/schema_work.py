@@ -1,5 +1,3 @@
-"""Bound pure schema CPU work per event loop; never pass sessions/ORM rows."""
-
 import asyncio
 
 from anyio.lowlevel import RunVar

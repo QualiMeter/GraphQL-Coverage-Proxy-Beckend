@@ -1,4 +1,3 @@
-"""Run the real shell flow with local Git and controlled Docker/HTTP failures."""
 import os
 from pathlib import Path
 import subprocess
@@ -36,7 +35,6 @@ def deploy(tmp_path):
     backups = tmp_path / "backups"
     script = tmp_path / "deploy.sh"
     source = SCRIPT.read_text()
-    # Only relocate root-owned filesystem paths and permit this test's UID.
     source = source.replace('/opt/graphql-coverage', str(app)).replace(
         '/root/graphql-coverage-backups', str(backups)).replace(
         '/var/lib/graphql-coverage-deploy', str(state)).replace(
@@ -104,7 +102,6 @@ def test_failed_deploy_retries_same_head_instead_of_false_success(deploy, failur
     assert deploy.run(fail=failure).returncode != 0
     assert command("git", "rev-parse", "HEAD", cwd=deploy.app) == deploy.new
     assert not deploy.marker.exists()
-    # Repeated failure must still fail and execute build again.
     assert deploy.run(fail=failure).returncode != 0
     assert deploy.log().count('build api') == 2
     assert deploy.run().returncode == 0
@@ -163,7 +160,6 @@ def test_busy_lock_prevents_all_deployment_work(deploy):
 
 
 def test_success_record_ahead_of_checkout_does_not_skip_deployment(deploy):
-    # Even an intact journal is insufficient when source checkout differs.
     command('git', 'fetch', 'origin', 'main', cwd=deploy.app)
     deploy.marker.parent.mkdir()
     deploy.marker.write_text(deploy.new + '\n')

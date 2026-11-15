@@ -1,5 +1,3 @@
-"""Pure request/response classification, without a running upstream or DB."""
-
 import pytest
 
 from app.e2e_capture import graphql_response_flags, parse_graphql_request

@@ -1,5 +1,3 @@
-"""Stage 5 on genuine PostgreSQL: percentile, safe wire AST, metadata and ACL."""
-
 import asyncio
 import hashlib
 import json
@@ -355,8 +353,6 @@ async def test_invalid_sdl_errors_are_generic_and_leave_no_partial_snapshot(feat
 
 
 async def test_historical_root_assignments_are_preserved_on_read(feature_context, postgres_session):
-    # graphql-core 3.2 accepted shared roots; 3.3 validates new imports more
-    # strictly. Reading a saved historical snapshot must preserve its metadata.
     from graphql import build_schema, print_schema
     client,service,_,_=feature_context
     sdl=print_schema(build_schema('schema { query: Root mutation: Root subscription: Root } type Root { field: String }'))

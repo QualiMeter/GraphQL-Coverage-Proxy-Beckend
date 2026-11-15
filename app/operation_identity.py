@@ -1,5 +1,3 @@
-"""Stable operation identity shared by storage and read-only analytics."""
-
 import hashlib
 import json
 

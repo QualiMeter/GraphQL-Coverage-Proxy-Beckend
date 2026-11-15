@@ -1,5 +1,3 @@
-"""Opaque, revocable sessions and password hashing; no JWT or browser API keys."""
-
 import asyncio
 import hashlib
 import hmac

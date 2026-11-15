@@ -1,4 +1,3 @@
-"""SSRF policy and actual httpcore socket boundary (not a mocked HTTP client)."""
 import asyncio
 import socket
 import ssl
@@ -114,7 +113,6 @@ async def test_rebinding_cannot_change_connected_ip_and_tls_keeps_hostname(monke
         return stream
     monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
     async with httpx.AsyncClient(transport=PinnedTransport(destination), trust_env=False) as client:
-        # An extension cannot override the TLS identity chosen by the transport.
         response = await client.post(str(destination.url), content=b'{"query":"{x}"}',
                                      extensions={"sni_hostname": "attacker.example"})
     assert response.json() == {"data": {}}

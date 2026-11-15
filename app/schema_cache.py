@@ -1,5 +1,3 @@
-"""One bounded cache of immutable saved schemas shared by analysis and metadata."""
-
 from functools import lru_cache
 
 from graphql import GraphQLSchema, build_schema

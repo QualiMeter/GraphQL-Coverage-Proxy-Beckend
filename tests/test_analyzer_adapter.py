@@ -1,5 +1,3 @@
-"""The production callback must produce real AST results, not fixture coverage."""
-
 import pytest
 
 from app.analyzer_adapter import _schema_from_sdl, analyze_e2e_query

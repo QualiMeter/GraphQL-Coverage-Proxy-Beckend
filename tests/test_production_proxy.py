@@ -1,5 +1,3 @@
-"""Exercise the actual Uvicorn proxy middleware loaded by the production entry point."""
-
 from pathlib import Path
 
 import httpx

@@ -22,7 +22,6 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="GraphQL Coverage API", version="0.1.0", lifespan=lifespan)
-# Only the actual AST analyzer is installed; no fabricated production results.
 app.state.coverage_analyzer = analyze_e2e_query
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins(), allow_methods=["*"],
                    allow_headers=["*"], expose_headers=["X-Total-Count"], allow_credentials=False)

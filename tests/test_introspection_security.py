@@ -1,4 +1,3 @@
-"""No forbidden socket connection, credential forwarding, redirects or retries."""
 import asyncio
 import json
 

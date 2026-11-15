@@ -1,4 +1,3 @@
-"""Service-aware introspection with PostgreSQL, real TCP upstreams and races."""
 import asyncio
 import json
 import uuid
@@ -74,7 +73,6 @@ async def test_two_real_introspection_upstreams_dedup_enrichment_and_history(rou
         monkeypatch.setenv("COVERAGE_LEGACY_PROXY", "true")
         monkeypatch.setenv("TARGET_GRAPHQL_URL", "http://127.0.0.1:1/WRONG")
         services = [await register(routed_client, name, origin + "/graphql") for name, origin in zip(seen, origins)]
-        # Existing SDL identity, type/field IDs and historical coverage must survive enrichment.
         async with isolated_database() as session:
             original = await import_sdl(session, uuid.UUID(services[0]["id"]), SDL_A)
             run = await create_run(session, original.id, "Historical", {})
@@ -101,14 +99,12 @@ async def test_two_real_introspection_upstreams_dedup_enrichment_and_history(rou
                     .join(SchemaField, SchemaField.type_id == SchemaType.id).where(SchemaType.snapshot_id == row.id))).all()
                 assert any(type_name == "Query" and field == ("accounts" if sdl == SDL_A else "products") and target is not None
                            for type_name, field, target in relations)
-            # Compare the original snapshot's children and its run observations exactly.
             after = [(await session.execute(text(f"SELECT jsonb_agg(to_jsonb(t) ORDER BY t.{order}) FROM {table} t {where}"))).scalar()
                 for table, order, where in (("schema_types", "id", f"WHERE t.snapshot_id = '{original.id}'"),
                     ("schema_fields", "id", f"WHERE t.type_id IN (SELECT id FROM schema_types WHERE snapshot_id = '{original.id}')"),
                     ("test_runs", "id", ""), ("observed_requests", "id", ""), ("request_field_usage", "field_id", ""))]
             assert after == before
         assert len(seen["accounts"]) == 2 and len(seen["products"]) == 1
-        # Continue the complete frontend/E2E path on the introspected B snapshot.
         run_b = await routed_client.post("/api/runs", json={"snapshotId": results[1].json()["id"], "name": "Products E2E"})
         assert run_b.status_code == 201
         exchange = await routed_client.post("/graphql", json={"query": "{ products { sku } }"},

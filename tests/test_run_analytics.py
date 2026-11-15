@@ -1,5 +1,3 @@
-"""Identity and HTTP contract checks that do not need a database."""
-
 import uuid
 from unittest.mock import AsyncMock
 

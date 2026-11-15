@@ -1,5 +1,3 @@
-"""Independent audit regressions on isolated PostgreSQL and real HTTP routes."""
-
 import asyncio
 import hashlib
 import json
@@ -40,7 +38,6 @@ CURRENT_REVISION = "20261119_operation_name_text"
 
 @pytest.fixture
 async def pool_context(isolated_database, monkeypatch):
-    # Match SQLAlchemy's standard 5+10 capacity; only shorten failure timeout.
     engine = create_async_engine(isolated_database.kw["bind"].url,
                                  pool_size=5, max_overflow=10, pool_timeout=.5)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -200,7 +197,6 @@ async def test_mutation_commit_failure_never_repeats_upstream(pool_context, monk
 async def test_run_metadata_policy_for_all_responses(auth_context, postgres_session, role):
     client, users, private, _, snapshot, _, run, _ = auth_context
     marker = {"private": "stage6-admin-only-marker"}
-    # Admin creates the marked run through the real API, then another identity reads/finishes it.
     admin_headers, _ = await login(client, "admin")
     assert (await client.post(f"/api/runs/{run.id}/finish", headers=admin_headers)).status_code == 200
     created = await client.post("/api/runs", json={"snapshotId": str(snapshot.id), "name": "Marked", "metadata": marker}, headers=admin_headers)
@@ -305,7 +301,6 @@ async def test_operation_name_migration_preserves_rows_and_refuses_lossy_downgra
     await migrate("upgrade", "head")
     assert await column_type() == "text" and await rows() == before
     await migrate("check")
-    # Safe downgrade remains supported, including null and boundary names.
     await migrate("downgrade", PREVIOUS_REVISION)
     assert await rows() == before
     await migrate("upgrade", "head")

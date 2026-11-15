@@ -1,9 +1,3 @@
-"""Role and CSRF checks for sessions, with constant-time trusted CLI-key authentication.
-
-The administrative key is not a GraphQL upstream credential. In particular,
-the proxy must never forward it to TARGET_GRAPHQL_URL.
-"""
-
 import hmac
 import os
 
@@ -21,7 +15,6 @@ _api_key_scheme = APIKeyHeader(
 
 def configured_api_key() -> str | None:
     value = os.environ.get("COVERAGE_API_KEY", "")
-    # Refuse short or accidentally unset production secrets.
     return value if len(value) >= 32 and value.isascii() else None
 
 
@@ -36,8 +29,6 @@ def is_admin(request: Request) -> bool:
     )
 
 
-# Keep the constant-time CLI-key helpers above; browser access uses a distinct,
-# revocable credential with explicit roles and per-service grants.
 
 _cookie_scheme = APIKeyCookie(name=cookie_name(), scheme_name="CoverageSession", auto_error=False)
 ROLE_RANK = {"viewer": 0, "analyst": 1, "operator": 2, "admin": 3}

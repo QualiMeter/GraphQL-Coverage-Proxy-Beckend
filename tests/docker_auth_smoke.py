@@ -81,7 +81,6 @@ http {{
                        "--tmpfs", "/tmp", "-v", f"{path}:/etc/nginx:ro"]
             run(["docker", "run", "--rm", *options, "nginx:stable-alpine", "nginx", "-t"])
             run(["docker", "run", "-d", "--name", nginx, *options, "nginx:stable-alpine"])
-            # TLS verification is disabled only for this loopback/self-signed test.
             with httpx.Client(base_url=f"https://127.0.0.1:{tls_port}", verify=False, trust_env=False, timeout=5,
                               headers={"Host": "graphql.rebyte.fun", "Origin": ORIGIN}) as browser:
                 deadline = time.monotonic() + 30
@@ -97,7 +96,6 @@ http {{
                 response = browser.post("/api/auth/users", json={"username": "smokeadmin", "password": PASSWORD, "role": "admin"},
                                         headers={"X-Coverage-Api-Key": TEST_KEY})
                 assert response.status_code == 201, "Test account creation failed"
-                # Attacker headers must be replaced by the real TLS scheme/peer at Nginx.
                 response = browser.post("/api/auth/login", json={"username": "smokeadmin", "password": PASSWORD}, headers={
                     "X-Forwarded-Proto": "http", "X-Forwarded-For": "203.0.113.200",
                     "Forwarded": "proto=http;host=attacker.invalid", "X-Forwarded-Host": "attacker.invalid",
@@ -111,7 +109,6 @@ http {{
                 assert browser.post("/api/auth/logout", headers={"X-CSRF-Token": csrf, "Origin": "https://attacker.invalid"}).status_code == 403
                 assert browser.post("/api/auth/logout", headers={"X-CSRF-Token": csrf}).status_code == 204
                 assert browser.get("/api/auth/session").json()["user"] is None
-            # A different transport peer cannot promote HTTP to HTTPS with headers.
             probe = "import httpx; r=httpx.post('http://127.0.0.1:8000/api/auth/login', headers={'Origin':'https://graphql.rebyte.fun','X-Forwarded-Proto':'https'}, json={'username':'smokeadmin','password':'test'}, trust_env=False); print(r.status_code)"
             assert run([*compose, "exec", "-T", "api", "python", "-c", probe]) == "403"
         print("Nginx TLS -> host loopback -> Docker NAT -> Uvicorn login/cookie/CSRF/logout: PASS", flush=True)

@@ -1,5 +1,3 @@
-"""Frontend-facing REST endpoints with role and service access checks."""
-
 import uuid
 from typing import Annotated
 

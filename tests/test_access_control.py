@@ -1,5 +1,3 @@
-"""No database is needed to verify authentication and route fail-closed behavior."""
-
 import uuid
 
 import pytest

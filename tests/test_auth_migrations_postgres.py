@@ -1,5 +1,3 @@
-"""Exercise Alembic upgrade/downgrade with historical rows in an isolated DB."""
-
 import asyncio
 import os
 from pathlib import Path
@@ -51,7 +49,6 @@ async def test_auth_migration_preserves_existing_services_snapshots_runs_and_obs
         await migrate("upgrade", "head")
         assert await history() == before
         async with engine.connect() as connection:
-            # The historical row lacks identity; the new cache must stay null.
             assert await connection.scalar(text("SELECT operation_key FROM observed_requests WHERE id=:id"),
                                            {"id": observation}) is None
         async with engine.connect() as connection:

@@ -1,5 +1,3 @@
-"""Stage 4 contracts against real PostgreSQL, including ACL and historic migration."""
-
 import asyncio
 import os
 from pathlib import Path
@@ -221,7 +219,6 @@ async def test_detail_counting_snapshot_identity_missing_and_no_secrets(journal_
         {'typeName': 'User', 'fieldName': 'id', 'returnType': 'ID!'},
         {'typeName': 'User', 'fieldName': 'name', 'returnType': 'String'},
     ]
-    # Simulate inconsistent historic field references; never expose/filter other snapshots.
     wrong_field = await postgres_session.scalar(select(SchemaField.id).join(SchemaType, SchemaType.id == SchemaField.type_id)
         .where(SchemaType.snapshot_id == other_schema.id, SchemaField.name == 'health'))
     postgres_session.add(RequestFieldUsage(request_id=uuid.UUID(a), field_id=wrong_field))
@@ -364,7 +361,6 @@ async def test_missing_scopes_empty_journal_and_query_count(journal_context, pos
     try:
         response = await client.get(path, params={'typeName': 'User', 'limit': 3, 'offset': 2})
         assert len(response.json()) == 3 and response.headers['X-Total-Count'] == '10'
-        # Two ACL reads, optional run load, count, page: independent of page size/fields.
         assert len(queries) <= 5
         assert any('EXISTS' in q for q in queries)
         assert any('LIMIT' in q and 'OFFSET' in q for q in queries)

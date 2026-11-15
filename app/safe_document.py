@@ -82,7 +82,6 @@ class _Mask(Visitor):
 
 
 def mask_value_ast(node: Node) -> SafeDocument:
-    """Also used for schema argument defaults; never print an unmasked value."""
     try:
         _bounded_tree(node)
         masker = _Mask()

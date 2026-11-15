@@ -1,5 +1,3 @@
-"""Service DNS waits own no DB connections; writes recheck live permissions."""
-
 import asyncio
 from types import SimpleNamespace
 
@@ -30,7 +28,6 @@ async def service_dns_app(isolated_database, monkeypatch):
     global _encoded_password
     if _encoded_password is None:
         _encoded_password = await asyncio.to_thread(hash_password, PASSWORD)
-    # Unmodified SQLAlchemy defaults: pool_size=5, max_overflow=10, timeout=30.
     engine = create_async_engine(isolated_database.kw["bind"].url)
     assert engine.pool.size() == 5 and engine.pool._max_overflow == 10 and engine.pool.timeout() == 30
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -53,7 +50,6 @@ async def service_dns_app(isolated_database, monkeypatch):
     app.dependency_overrides[get_session_factory] = lambda: sessions
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:
-            # Real login, hashed opaque session, Origin and derived CSRF token.
             login = await client.post("/api/auth/login", json={"username": "dns-operator", "password": PASSWORD},
                                       headers={"Origin": ORIGIN})
             assert login.status_code == 200, login.text
@@ -78,7 +74,6 @@ def paused_dns(monkeypatch, count=1):
             started.set()
         await release.wait()
         return [(2, 1, 6, "", (address, port)) for address in addresses]
-    # Exercise the real validate_endpoint and its URL / returned-IP SSRF checks.
     monkeypatch.setattr(upstream, "_resolve", resolve)
     return SimpleNamespace(started=started, release=release, calls=calls, addresses=addresses)
 
@@ -170,7 +165,6 @@ async def test_service_writes_reauthorize_after_dns(service_dns_app, monkeypatch
             if change in ("grant", "grant_and_run"):
                 await session.execute(delete(ServiceGrant).where(ServiceGrant.user_id == context.user_id))
             if change == "deleted":
-                # Remove the fixture's empty snapshot first (FK is RESTRICT).
                 from app.models import SchemaSnapshot, SchemaType, SchemaField
                 await session.execute(delete(SchemaField).where(SchemaField.type_id.in_(
                     select(SchemaType.id).where(SchemaType.snapshot_id == context.snapshot.id))))
@@ -223,8 +217,6 @@ async def test_failed_service_writes_are_atomic(service_dns_app, monkeypatch, me
             else:
                 real_commit = AsyncSession.commit
                 async def fail_commit(session):
-                    # Flush first so rollback must undo both the service and
-                    # its owner grant (or all modified PATCH attributes).
                     await session.flush()
                     raise SQLAlchemyError("forced commit failure")
                 monkeypatch.setattr(AsyncSession, "commit", fail_commit)
@@ -261,7 +253,6 @@ async def test_patch_rechecks_permissions_after_service_lock_wait(service_dns_ap
         assert context.engine.pool.checkedout() == 0
         async with context.sessions() as owner:
             await owner.execute(select(GraphQLService).where(GraphQLService.id == context.service.id).with_for_update())
-            # Observe the route's own lock attempt, excluding the owner query.
             blocked.clear()
             dns.release.set()
             await asyncio.wait_for(blocked.wait(), 3)

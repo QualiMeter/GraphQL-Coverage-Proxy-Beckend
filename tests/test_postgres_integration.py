@@ -1,5 +1,3 @@
-"""Genuine database test. Uses a SAVEPOINT under an outer rollback-only transaction."""
-
 import os
 import uuid
 
@@ -152,7 +150,6 @@ async def test_coverage_summary_counts_only_object_fields(postgres_session):
         ("Node", "id"): 0,
     }
 
-    # Inject an interface hit directly at the storage boundary.
     graph = await record("query", ("Node", "id"))
     assert (graph.summary.covered_fields, graph.summary.total_fields) == (6, 9)
     assert graph.summary.coverage_percent == 66.67
@@ -232,7 +229,6 @@ async def test_observation_rolls_back_when_field_usage_insert_fails(postgres_ses
         duration_ms=7,
     )
 
-    # The constraint lives in the same savepoint as the failed write.
     usage_count = select(func.count()).select_from(RequestFieldUsage)
     previous_usage_count = await session.scalar(usage_count)
     await session.execute(text(

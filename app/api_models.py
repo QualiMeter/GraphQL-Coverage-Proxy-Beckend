@@ -1,5 +1,3 @@
-"""JSON contracts. Public API always serializes attributes as camelCase."""
-
 import uuid
 from datetime import datetime
 from typing import Any, Literal

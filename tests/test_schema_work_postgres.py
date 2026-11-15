@@ -1,4 +1,3 @@
-"""HTTP schema CPU phases release PostgreSQL and preserve atomic writes/ACL."""
 import asyncio
 import threading
 import uuid
@@ -161,8 +160,6 @@ async def test_stats_matches_graph_without_building_schema_or_graph_dtos(service
     from app.services import create_run, get_run_graph, import_sdl, record_observation
     from app.run_analytics import get_run_stats
     ctx = service_dns_app
-    # OBJECT and INTERFACE fields must retain the historical denominator and
-    # deduplication semantics even when the same field is hit repeatedly.
     sdl = '''interface Node { id: ID! } type Query { node: Item unused: String }
              type Item implements Node { id: ID! value: String }
              union Result = Item'''

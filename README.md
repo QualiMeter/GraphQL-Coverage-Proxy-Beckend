@@ -11,31 +11,30 @@
 [репозиторий React/Vite](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-Frontend).
 Статическая сборка публикуется на VPS отдельным GitHub Actions workflow при
 успешном CI на `main`; Nginx отдаёт её с того же HTTPS origin, что и API.
-Пока UI использует mock/localStorage, интеграция с реальным API — задача фронтендера.
+React читает с сервера каталог сервисов, снимки, граф схемы и SDL. Покрытие конкретного прогона доступно через REST.
 
-Регистрация для просмотра опубликованных сервисов не нужна. В этой ветке добавлены
-серверные сессии, роли и ACL (этап 1 v2.0, до production не выложено).
 [Контракт авторизации и bootstrap](docs/frontend-auth.md) ·
 [план следующих P0/P1](docs/v2-implementation-plan.md).
 CLI/E2E сохраняет серверный API key, браузер использует cookie+CSRF.
 
-## Что уже работает
+## Реализованные функции
 
-- Семь core-таблиц PostgreSQL и четыре таблицы авторизации с внешними ключами, CHECK, UNIQUE и индексами;
-  отдельная миграция для приватности сервисов.
-- Импорт схемы из **SDL** и через GraphQL introspection с разбором полей и SHA-256 снимка.
-- Создание сервиса и прогона E2E; запрет второго активного прогона в рамках снимка схемы.
-- Сохранение наблюдения через Python-функцию `app.services.record_observation()`.
-- Подсчёт уникального покрытия полей и числа запросов, затронувших каждое поле.
-- REST API и автоматическая документация Swagger/OpenAPI.
-- Пользователи viewer/analyst/operator/admin, серверные сессии, CSRF, grants, bootstrap CLI.
-- `POST /graphql` — безопасная маршрутизация run → snapshot → service.endpointUrl.
-- GraphQL AST Analyzer для query/mutation, подключённый к E2E-записи через async-адаптер.
-- Публичные/приватные сервисы (`isPublic`) и API-ключ для изменяющих операций.
+Бэкенд измеряет использование полей на трафике конкретного прогона. Сначала сервис получает снимок схемы. Тест создаёт прогон на этом снимке и передаёт его ID в `POST /graphql`. После ответа upstream бэкенд записывает наблюдение. По одному `runId` можно получить и общую долю покрытия, и обращения, из которых она сложилась.
 
-**Пока не реализовано:** поддержка GraphQL fragments/subscriptions,
-привязка к конкретному E2E-тест-кейсу.
-Публичный фронтенд никогда не должен содержать административный API-ключ.
+| Возможность | Что получает клиент | Где реализовано | Где проверяется |
+| --- | --- | --- | --- |
+| Каталог и адреса сервисов | Регистрация GraphQL endpoint, публичность и выбор upstream по сервису прогона | [Маршруты REST](app/api.py), [операции с сервисами](app/services.py) | [Маршрутизация двух сервисов](tests/test_multi_service_postgres.py) |
+| Вход и права | Серверная cookie-сессия, роли viewer/analyst/operator/admin, выдача и отзыв доступа к сервису, защита изменений через Origin и CSRF. Для CI предусмотрен API-ключ | [API пользователей и сессий](app/auth_api.py), [проверка прав](app/access.py), [bootstrap первого администратора](app/auth_cli.py) | [Сессии и права на PostgreSQL](tests/test_browser_auth_postgres.py) |
+| Импорт и версии схем | Снимок из SDL или introspection, идентификатор и хеш, повторное использование одинакового снимка в рамках сервиса | [Загрузка схемы](app/schema_collector.py), [разбор SDL](app/schema_parser.py), [сохранение](app/services.py) | [Импорт из работающего upstream](tests/test_service_introspection_postgres.py) |
+| Исследование снимка | SDL, граф типов и связей, аргументы полей, признаки deprecated, корневые типы и отображаемое имя снимка | [Метаданные](app/schema_metadata.py), [форматы ответов](app/api_models.py) | [Метаданные и доступ к документу](tests/test_final_features_postgres.py) |
+| Прогоны и история | Создание, завершение, история по снимку или сервису. Один снимок допускает один активный прогон. Данные завершённых прогонов остаются в PostgreSQL | [Жизненный цикл и хранилище](app/services.py), [миграции](alembic/versions/) | [История и права](tests/test_history_journal_postgres.py) |
+| HTTP-прокси | Маршрут от runId к endpoint, проверка назначения, передача разрешённых заголовков и исходного ответа upstream | [Обработчик /graphql](app/proxy.py), [исходящий транспорт](app/upstream.py) | [Прокси и запись наблюдения](tests/test_proxy_e2e_postgres.py), [cookie](tests/test_proxy_cookie_policy.py) |
+| Анализ GraphQL | Для query и mutation анализатор находит координаты выбранных полей с учётом вложенности, aliases, variables, `@skip` и `@include`. Ошибки разбора и валидации получают отдельные статусы | [AST-анализатор](app/query_analyzer.py), [обработка обмена](app/e2e_capture.py) | [Сценарии анализатора](tests/test_query_analyzer.py) |
+| Покрытие и аналитика | Уникальные покрытые поля, hits по координатам, группы операций, счётчики ошибок, средняя длительность и P95 | [Расчёт покрытия](app/services.py), [агрегаты прогонов](app/run_analytics.py) | [Покрытие на PostgreSQL](tests/test_postgres_integration.py), [статистика](tests/test_run_analytics_postgres.py) |
+| Журнал запросов | Фильтры и пагинация, выбранные поля отдельного обращения, признак учёта в покрытии и маскированное представление документа | [Журнал](app/journal.py), [маскирование литералов](app/safe_document.py) | [Проверки маскирования](tests/test_safe_document.py) |
+| Развёртывание | PostgreSQL 16 и Alembic в Compose, запуск Uvicorn за доверенным прокси, повтор неудавшегося деплоя | [Compose](compose.yaml), [сервер](app/server.py), [скрипт деплоя](deploy/vps/graphql-coverage-deploy.sh) | [Повторный деплой](tests/test_deploy_retries.py) |
+
+**Границы анализа.** Fragments и subscriptions получают статус `unsupported`. Связь обращения с конкретным pytest-тестом ведёт QA-проект. Для браузерного клиента основным идентификатором серверной аналитики служит `runId`.
 
 ## Локальный запуск через Docker
 
@@ -45,6 +44,8 @@ CLI/E2E сохраняет серверный API key, браузер испол
 docker compose up --build -d
 ```
 
+Для проверки входа с локального React укажите в файле `.env` рядом с `compose.yaml` значения `COVERAGE_DEV_MODE=true` и `COVERAGE_PUBLIC_ORIGIN=http://localhost:5173`, затем выполните команду запуска. Для CLI задайте в том же окружении `COVERAGE_API_KEY`. Если backend запущен в контейнере, адрес upstream должен быть доступен из него. Для локального HTTP-upstream настройте точный origin через `COVERAGE_DEV_UPSTREAM_ORIGINS`.
+
 Compose поднимет PostgreSQL 16, применит миграцию Alembic и запустит FastAPI.
 
 - API: http://localhost:8000
@@ -53,7 +54,9 @@ Compose поднимет PostgreSQL 16, применит миграцию Alembi
 - PostgreSQL на хосте: 127.0.0.1:5432
 
 Учётные данные PostgreSQL в `compose.yaml` только для локальной разработки.
-В реальном окружении используйте отдельные секреты.
+Конфигурация production находится в `deploy/`.
+
+Для создания первого администратора в уже запущенном Compose выполните `docker compose exec api python -m app.auth_cli bootstrap-admin initialadmin`. Остановка через `docker compose down` сохраняет именованный том PostgreSQL.
 
 Проверка:
 
@@ -238,7 +241,7 @@ Legacy fallback для NULL endpoint — только explicit COVERAGE_LEGACY_P
 2. `POST /api/schemas/import` — импортируем SDL, получаем `schemaId` (в ответе `id`).
 3. `GET /api/schemas/{schemaId}/graph` — карта ещё без данных о прогонах.
 4. `POST /api/runs` — запускаем прогон.
-5. Позже прокси записывает наблюдения через `record_observation()`.
+5. Отправьте запрос к upstream через `POST /graphql` с заголовком `X-Coverage-Run-Id`. Прокси запишет наблюдение после ответа upstream.
 6. `GET /api/runs/{runId}/coverage` — получаем реальные поля, связи и покрытие.
 7. `POST /api/runs/{runId}/finish` — закрываем прогон.
 
@@ -273,7 +276,7 @@ REST API предоставляет агрегаты существующих н
 Этап 5 добавляет P95/analysisStatusCounts, masked AST реального документа,
 SDL и метаданные схемы, displayName. [Контракт frontend](docs/frontend-final-features.md),
 [миграция и будущий release](deploy/STAGE5-RELEASE.md).
-сравнение прогонов — P2, позже.
+Для сравнения двух сохранённых прогонов используйте модуль diff в [QA-проекте](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-QA).
 
 ## Тесты
 
@@ -282,21 +285,21 @@ pip install -e '.[test]'
 pytest -q
 ```
 
-Интеграционный тест PostgreSQL работает только с переменной `TEST_DATABASE_URL`.
-Он использует откатываемую внешнюю транзакцию и требует уже созданных таблиц:
+Основной CI использует Linux, Python 3.12 и PostgreSQL 16. Набор включает тесты Bash-скриптов развёртывания. Для интеграционных тестов задайте отдельную БД в `TEST_DATABASE_URL`, примените к ней миграции и предоставьте тестовой роли CREATEDB для сценариев с временными базами:
 
 ```bash
-export TEST_DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage
+export TEST_DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage_test
+DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
 pytest -q -m integration
 ```
 
 Используйте только выделенную тестовую БД. Если переменная не задана,
 интеграционный тест пропускается (это не считается доказательством работы БД).
 
-## Подключение остальных бэкендеров
+## Внутренние контракты
 
 - Общие типы: `app/contracts.py`.
-- GraphQL Analyzer должен выдавать `AnalysisResult` со списком `FieldReference`.
+- GraphQL Analyzer возвращает `AnalysisResult` со списком `FieldReference`.
 - Proxy вызывает `capture_e2e_exchange()` после ответа upstream для запросов
   с runId; реальный Analyzer подключён через `app.analyzer_adapter`.
 - Хеш запроса — SHA-256 текста GraphQL; не хранить переменные, авторизацию и cookies.
@@ -307,7 +310,7 @@ pytest -q -m integration
 
 Изменения в `contracts.py` согласовываются между разработчиками.
 
-## Проверка этапа авторизации
+## Проверка авторизации и миграций
 
 ```bash
 export DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage_test
@@ -323,7 +326,6 @@ python -m app.auth_cli cleanup
 Для HTTP разработки явно задать COVERAGE_DEV_MODE=true и точный
 COVERAGE_PUBLIC_ORIGIN; production — HTTPS и доверенные reverse proxy headers.
 Подробные настройки, эксплуатационные ограничения и DTO — [frontend-auth.md](docs/frontend-auth.md).
-Деплой и production-миграции этой задачей не выполняются.
 
 Перед merge при существующем автодеплое: [порядок безопасного выпуска PR #23](deploy/PR23-RELEASE.md).
 Production требует точный FORWARDED_ALLOW_IPS после Docker NAT и использует

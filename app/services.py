@@ -1,5 +1,3 @@
-"""Database use cases; called by HTTP routes and future proxy integration."""
-
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -297,7 +295,6 @@ async def import_introspection_schema(
     async with sessions() as session:
         async with session.begin():
             # Lock, reauthorize and compare the endpoint in the write transaction.
-            # Keep all schema/type/field flushes protected by the existing savepoint.
             result = await _save_parsed_schema(
                 session, service_id, collected.parsed, source="introspection",
                 introspection_json=collected.introspection_json, expected_endpoint=endpoint,
@@ -382,7 +379,7 @@ async def finish_run(session: AsyncSession, run_id: uuid.UUID, *, include_metada
 
 
 async def record_observation(session: AsyncSession, observation: RequestObservationInput) -> uuid.UUID:
-    """Internal API for the future proxy; never accepts unverified field IDs from a client.
+    """Record an observation against the running snapshot.
 
     The proxy must supply truthful upstream metadata. Cross-snapshot field
     references are rejected atomically. A failed analysis may have no fields.

@@ -1,5 +1,3 @@
-"""SQL pagination and snapshot-scoped journal reads. No bodies are reconstructed."""
-
 import re
 import uuid
 from datetime import timezone

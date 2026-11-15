@@ -1,5 +1,3 @@
-"""Read-only run analytics over persisted observations; no request bodies needed."""
-
 import uuid
 from datetime import timezone
 

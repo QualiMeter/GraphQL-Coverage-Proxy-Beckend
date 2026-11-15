@@ -1,5 +1,3 @@
-"""Aggregates and access are verified against real PostgreSQL observations."""
-
 import hashlib
 import uuid
 from datetime import datetime, timezone
@@ -73,7 +71,6 @@ async def test_empty_run_and_unknown_duration(postgres_session, analytics_run, n
         "total_fields": 7, "covered_fields": 0, "coverage_percent": 0.0, "request_timeline": [],
     }
     assert await list_operations(session, run.id) == []
-    # Repeated schema coordinates still produce one request-field association.
     for _ in range(2):
         await observe(session, run.id, name=name, fields=(("Query", "health"), ("Query", "health")))
     stats = await get_run_stats(session, run.id)
@@ -89,7 +86,6 @@ async def test_empty_run_and_unknown_duration(postgres_session, analytics_run, n
 async def test_aggregates_group_identity_errors_fields_timeline_and_history(postgres_session, analytics_run):
     _, schema, run = analytics_run
     session = postgres_session
-    # A session with a fractional timezone offset must still produce UTC minute boundaries.
     await session.execute(text("SET LOCAL TIME ZONE 'Asia/Kathmandu'"))
     fields = (("Query", "users"), ("User", "id"), ("User", "id"), ("User", "name"))
     await observe(session, run.id, fields=fields, duration=10, at="2026-11-13T23:59:59.999999+00:00")
@@ -107,7 +103,6 @@ async def test_aggregates_group_identity_errors_fields_timeline_and_history(post
                   data=False, http=None, errors=None)
     await observe(session, run.id, query_hash="e" * 64, name="Updates", kind="subscription",
                   status="unsupported", data=False, errors=True)
-    # Legacy observations without a hash count in stats and coverage, without fake identity.
     await observe(session, run.id, query_hash=None, fields=(("Query", "health"),))
     await observe(session, run.id, status="validation_error", data=False, errors=True)
 
@@ -150,7 +145,6 @@ async def test_aggregates_group_identity_errors_fields_timeline_and_history(post
     await create_run(session, new_schema.id, "New schema", {})
     assert await get_run_stats(session, run.id) == stats
     assert await list_operations(session, run.id) == operations
-    # Keys are stable across runs, independent of timestamps and database IDs.
     later_operation, = await list_operations(session, later.id)
     assert later_operation.operation_key == a.operation_key
 
@@ -201,7 +195,6 @@ async def test_analytics_visibility_http_filters_and_existing_protection(postgre
             assert (await client.get(f"/api/runs/{run.id}/requests")).status_code == 401
             assert (await client.get(f"/api/runs/{run.id}/requests", headers=headers)).status_code == 200
             assert (await client.post("/graphql", json={})).status_code == 401
-            # Public reads still work when administrative auth is not configured.
             monkeypatch.delenv("COVERAGE_API_KEY")
             for endpoint in ("operations", "stats"):
                 assert (await client.get(f"/api/runs/{run.id}/{endpoint}")).status_code == 200
@@ -258,7 +251,6 @@ async def test_operation_field_hits_match_coverage_engine(postgres_session, anal
     session = postgres_session
     fields = (("Query", "users"), ("User", "id"), ("User", "id"))
     await observe(session, run.id, fields=fields)
-    # Errors do not disqualify an otherwise counted request.
     await observe(session, run.id, fields=fields, http=500, errors=True)
     await observe(session, run.id, fields=fields + (("User", "name"),), data=uncounted_data)
     operation, = await list_operations(session, run.id)
@@ -271,7 +263,6 @@ async def test_operation_field_hits_match_coverage_engine(postgres_session, anal
     engine_hits = {(node.name, field.name): field.hits for node in graph.types for field in node.fields}
     assert all(field.hits == engine_hits[(field.type_name, field.field_name)] for field in operation.fields)
     assert engine_hits[("User", "name")] == 0
-    # An operation with no counted requests has no counted fields.
     await observe(session, run.id, query_hash="b" * 64, fields=fields, data=uncounted_data)
     uncounted = next(item for item in await list_operations(session, run.id)
                      if item.operation_key == operation_key("b" * 64, "GetUsers", "query"))

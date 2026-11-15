@@ -1,5 +1,3 @@
-"""Proxy opt-in contract; analyzers and persistence are test doubles only."""
-
 import gzip
 import uuid
 import zlib

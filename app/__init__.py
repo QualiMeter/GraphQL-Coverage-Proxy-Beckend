@@ -1,1 +1,0 @@
-"""GraphQL coverage API."""

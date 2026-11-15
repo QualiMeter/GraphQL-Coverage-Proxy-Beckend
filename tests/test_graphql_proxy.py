@@ -29,7 +29,6 @@ def upstream(monkeypatch):
             requests.append(request)
             return await transport.handle_async_request(request)
 
-        # Replace only network I/O; exercise the production AsyncClient and route.
         monkeypatch.setattr(PinnedTransport, "handle_async_request", handle_request)
         return requests
 
@@ -253,7 +252,6 @@ async def test_rejects_target_userinfo_without_request_or_secret_logs(
     assert response.status_code == 503
     assert response.json() == {"detail": "GraphQL upstream destination is unavailable or not permitted"}
     assert len(requests) == 0
-    # Boolean aggregation avoids printing captured credentials on assertion failure.
     assert all(value not in caplog.text for value in (
         target, "test-user", "test-password", "test%2Duser", "test%2Dpassword",
         "test-token", "test-cookie",

@@ -1,5 +1,3 @@
-"""Additive authentication tables; raw session tokens and credentials are never persisted."""
-
 import uuid
 from datetime import datetime
 

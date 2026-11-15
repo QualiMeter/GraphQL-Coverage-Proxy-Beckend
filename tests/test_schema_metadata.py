@@ -20,7 +20,6 @@ def test_argument_descriptions_types_all_defaults_and_absence():
     serialized=' '.join(str(a.default_value) for a in args.values())
     for secret in ('schema-secret','998877','SECRET_ENUM','nested-schema-secret','list-schema-secret'):
         assert secret not in serialized
-    # Metadata projection must not mutate the actual schema/default AST used by analysis.
     assert 'schema-secret' in print_ast(field.args['text'].ast_node.default_value)
     assert root_types(schema).model_dump()=={'query':'Query','mutation':None,'subscription':None}
 

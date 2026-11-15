@@ -25,7 +25,6 @@ Analyzer = Callable[[GraphQLQueryInput, str], Awaitable[AnalysisResult]]
 
 
 def parse_graphql_request(body: bytes) -> GraphQLQueryInput | None:
-    """Decode a single standard GraphQL-over-HTTP JSON request, if supported."""
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError, RecursionError):
@@ -72,7 +71,6 @@ def graphql_response_flags(decoded_body: bytes | None) -> tuple[bool | None, boo
 
 
 async def load_run_snapshot(session: AsyncSession, run_id: uuid.UUID) -> SchemaSnapshot:
-    """Resolve only the specified running run and its immutable schema snapshot."""
     run = await session.get(TestRun, run_id, populate_existing=True)
     if run is None:
         raise NotFoundError("Test run not found")

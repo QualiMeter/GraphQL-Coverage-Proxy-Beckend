@@ -1,5 +1,3 @@
-"""Browser login → cookie/CSRF → role + service ACL → real PostgreSQL actions."""
-
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -48,8 +46,6 @@ async def auth_context(postgres_session, monkeypatch):
 
     async def dependency():
         yield postgres_session
-    # Separate ORM sessions join only the test's rollback-only connection. Real
-    # connection/pool ownership is covered by the one-connection regression test.
     sessions = async_sessionmaker(bind=postgres_session.bind, expire_on_commit=False,
                                  join_transaction_mode="create_savepoint")
     app.dependency_overrides[get_session_factory] = lambda: sessions
@@ -114,7 +110,6 @@ async def test_roles_and_nested_private_service_acl(role, auth_context, postgres
     for path in private_paths:
         assert (await client.get(path)).status_code == (200 if role == "admin" else 404)
     assert (await client.get(f"/api/runs/{public_run.id}/stats")).status_code == 200
-    # Publication authorizes aggregates, never request journal or management.
     journal = f"/api/runs/{public_run.id}/requests"
     assert (await client.get(journal)).status_code == (403 if role == "viewer" else 200 if role == "admin" else 404)
     await grant(postgres_session, users[role], private)
@@ -151,7 +146,6 @@ async def test_csrf_all_write_routes_and_operator_creation_grants(auth_context, 
     assert response.status_code == 201
     service_id = uuid.UUID(response.json()["id"])
     assert await postgres_session.get(ServiceGrant, (users["operator"].id, service_id)) is not None
-    # No operator grant: even a public service cannot be modified by guessing its UUID.
     assert (await client.patch(f"/api/services/{public.id}", json={"isPublic": False}, headers=headers)).status_code == 404
     assert (await client.post(f"/api/runs/{public_run.id}/finish", headers=headers)).status_code == 404
 
@@ -175,7 +169,6 @@ async def test_admin_user_management_revokes_sessions_and_protects_last_admin(au
     operator_headers, _ = await login(client, "operator")
     operator_token = client.cookies.get("__Host-coverage_session")
     assert (await client.patch(f"/api/auth/users/{user_ids['viewer']}", json={"role": "admin"}, headers=operator_headers)).status_code == 403
-    # CLI credential can deactivate a user and revoke all previously issued sessions.
     response = await client.patch(f"/api/auth/users/{user_ids['operator']}", json={"isActive": False}, headers={"X-Coverage-Api-Key": TEST_KEY})
     assert response.status_code == 200
     assert await postgres_session.get(BrowserSession, token_hash(operator_token), populate_existing=True) is None
@@ -209,7 +202,6 @@ async def test_acl_revocation_is_immediate_for_existing_session(auth_context, po
 
 async def test_login_throttle_is_persisted_and_does_not_reveal_users(auth_context, postgres_session):
     client, *_ = auth_context
-    # Unknown users receive the same safe error; pre-seed the expensive first attempts.
     from app.auth import throttle_login
     for _ in range(9):
         await throttle_login(postgres_session, "unknownuser", "127.0.0.1")
@@ -271,7 +263,6 @@ async def test_password_reset_and_role_change_revoke_browser_sessions(auth_conte
     client, users, *_ = auth_context
     for change in ({"password": "different test password 57"}, {"role": "viewer"}):
         if "role" in change:
-            # Restore only fixture password so the next login uses the original credential.
             users["operator"].password_hash = _encoded_password
             await postgres_session.commit()
         await login(client)
@@ -318,7 +309,6 @@ async def test_browser_cookies_cannot_cross_service_boundary(auth_context, postg
             ("Set-Cookie", "__Host-coverage_session=attacker; Secure; Path=/"),
         ])
     monkeypatch.setattr(PinnedTransport, "handle_async_request", upstream)
-    # Saved service endpoints determine routing; the global target is irrelevant.
     monkeypatch.setenv("TARGET_GRAPHQL_URL", "https://wrong-service.example/graphql")
     for run in (private_run, public_run):
         wire_headers = [*headers.items(), ("X-Coverage-Run-Id", str(run.id)),
@@ -350,8 +340,6 @@ async def test_login_csrf_and_logout_through_production_uvicorn_proxy(auth_conte
         response = await proxied.post("/api/auth/login", json={"username": "operator", "password": PASSWORD}, headers=headers)
         assert response.status_code == 200
         assert "Secure" in response.headers["set-cookie"] and "HttpOnly" in response.headers["set-cookie"]
-        # Transport leg is HTTP; simulate the cookie the external HTTPS browser
-        # sends to Nginx, rather than relaxing the client's Secure cookie rules.
         cookie = response.headers["set-cookie"].split(";", 1)[0]
         write_headers = {**headers, "Cookie": cookie, "X-CSRF-Token": response.json()["csrfToken"]}
         result = await proxied.post("/api/services", json={"key": "proxied-auth", "name": "Proxied", "endpointUrl": "https://93.184.216.34/graphql"}, headers=write_headers)

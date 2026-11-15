@@ -1,5 +1,3 @@
-"""Read metadata from immutable saved SDL; never change canonical hashes or IDs."""
-
 from graphql import GraphQLInterfaceType, GraphQLUnionType, Undefined, ast_from_value
 
 from app.api_models import RootTypesOut, SchemaArgumentOut

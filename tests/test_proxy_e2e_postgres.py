@@ -1,5 +1,3 @@
-"""Exercise POST /graphql through the real capture/storage/coverage pipeline."""
-
 import gzip
 import hashlib
 import json
@@ -142,7 +140,6 @@ async def test_http_exchange_committed_before_response_and_correct_snapshot(
     requests = upstream(lambda request: raw_response(201, wire, [
         ("Content-Encoding", "gzip"), ("Set-Cookie", "a=1"), ("Set-Cookie", "b=2"),
     ]))
-    # Real commit, rather than merely an INSERT/flush, must finish before response.
     commits = []
     real_commit = session.commit
 
@@ -190,7 +187,6 @@ async def test_http_exchange_committed_before_response_and_correct_snapshot(
     journal = await http_client.get(f"/api/runs/{run.id}/requests")
     assert journal.json()[0]["analysisStatus"] == "success"
 
-    # Inspect actual persisted column values, not ORM reprs (which omit values).
     persisted = []
     for table in Base.metadata.sorted_tables:
         persisted.extend(dict(row) for row in (await session.execute(select(table))).mappings())
@@ -228,7 +224,6 @@ async def test_failures_never_invent_coverage(
 ):
     session = postgres_session
     run, _, _ = await make_run(session)
-    # Hold an identity-map reference to expose stale run state in the row-lock check.
     cached_run = await session.get(Run, run.id)
 
     async def analyzer(*args):
@@ -257,7 +252,6 @@ async def test_failures_never_invent_coverage(
     if case in {"foreign_field", "finish_during_analysis", "commit_failure"}:
         assert response.status_code == 502
         assert "upstream may have executed" in response.text
-        # Roll back as a production request-scoped session does on close.
         await session.rollback()
         assert (await session.scalars(select(ObservedRequest))).all() == []
     else:

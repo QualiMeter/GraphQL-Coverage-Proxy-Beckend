@@ -1,4 +1,3 @@
-"""PostgreSQL pool size 1: no checkout while HTTP waits; reauthorize writes."""
 import asyncio
 import json
 import secrets
@@ -30,7 +29,6 @@ ORIGIN = "https://graphql.rebyte.fun"
 async def single_connection_app(isolated_database, monkeypatch):
     database = isolated_database.kw["bind"].url
     engine = create_async_engine(database, pool_size=1, max_overflow=0, pool_timeout=.4)
-    # Expiration also proves the returned DTO doesn't lazy-load after commit.
     sessions = async_sessionmaker(engine, expire_on_commit=True)
     token = secrets.token_urlsafe(32)
     monkeypatch.setenv("COVERAGE_API_KEY", TEST_ADMIN_KEY)
@@ -85,8 +83,6 @@ async def test_slow_introspection_releases_only_pool_connection(single_connectio
     try:
         await asyncio.wait_for(started.wait(), 2)
         assert not task.done() and context.engine.pool.checkedout() == 0
-        # This request uses the same size-1, no-overflow PostgreSQL pool. It must
-        # finish while the upstream remains blocked, not after release is set.
         response = await asyncio.wait_for(context.client.get("/api/services",
             headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}), 1)
         assert response.status_code == 200 and response.json()[0]["id"] == str(context.service_id)
@@ -96,7 +92,6 @@ async def test_slow_introspection_releases_only_pool_connection(single_connectio
         result = await asyncio.wait_for(task, 3)
         assert result.status_code == 201, result.text
         assert len(calls) == 1 and context.engine.pool.checkedout() == 0
-        # A new import still deduplicates using a separate write transaction.
         again = await context.client.post(ROUTE, json={"serviceId": str(context.service_id)}, headers=headers)
         assert again.status_code == 201 and again.json()["id"] == result.json()["id"]
         assert context.engine.pool.checkedout() == 0
