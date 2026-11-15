@@ -73,7 +73,7 @@ def test_service_list_is_public_by_default_and_admin_sees_private(monkeypatch):
     monkeypatch.setenv("COVERAGE_API_KEY", TEST_KEY)
     calls: list[bool] = []
 
-    async def fake_list_services(session, *, public_only=False):
+    async def fake_list_services(session, *, public_only=False, include_endpoint=False):
         calls.append(public_only)
         return []
 

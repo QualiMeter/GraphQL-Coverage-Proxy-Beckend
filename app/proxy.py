@@ -1,10 +1,10 @@
 """Transparent HTTP proxy with opt-in, synchronous E2E observation capture."""
 
+import asyncio
 import time
 import uuid
 import zlib
 from collections.abc import AsyncIterator
-from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -15,7 +15,10 @@ from app.auth import Principal, visibility_kwargs
 from app.config import target_graphql_url
 from app.database import SessionFactory
 from app.e2e_capture import capture_e2e_exchange, load_run_snapshot
-from app.services import ConflictError, NotFoundError, ensure_visible_snapshot
+from app.services import ConflictError, NotFoundError, ensure_visible_run
+from app.models import GraphQLService
+from app.upstream import (validate_endpoint, UnsafeEndpoint, legacy_enabled, PinnedTransport,
+                          MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, UpstreamTooLarge, outbound_slot)
 
 
 router = APIRouter(tags=["GraphQL Proxy"],
@@ -122,21 +125,37 @@ def trusted_e2e_cookies(request: Request, principal: Principal) -> bool:
     )
 
 
-@router.post("/graphql")
+@router.post("/graphql", responses={
+    400: {"description": "Missing, malformed or duplicate run UUID"},
+    409: {"description": "Run is not running or service endpoint is missing"},
+    413: {"description": "Request exceeds 1 MiB"},
+    502: {"description": "Upstream/capture failure; request may have executed, never retry automatically"},
+    503: {"description": "Storage, destination policy, DNS or outbound capacity unavailable"},
+    504: {"description": "Upstream timeout; request may have executed"},
+}, openapi_extra={"parameters": [{"name": "X-Coverage-Run-Id", "in": "header", "required": False,
+    "description": "Required UUID of a running run; determines service upstream. Only explicit legacy CLI mode permits omission.",
+    "schema": {"type": "string", "format": "uuid"}}]},
+    description="Routes through run → snapshot → service.endpointUrl. Original body is forwarded unchanged. "
+                "Browser cookies and internal coverage headers are stripped. No redirects or automatic retries.")
 async def graphql_proxy(request: Request, session: AsyncSession | None = Depends(get_proxy_session),
                         principal: Principal = Depends(require_operator)):
     run_id = coverage_run_id(request)
     analyzer = None
-    if run_id is None and not principal.api_key:
-        raise HTTPException(status_code=400, detail="X-Coverage-Run-Id is required for browser proxy requests")
+    if run_id is None and (not trusted_e2e_cookies(request, principal) or not legacy_enabled()):
+        raise HTTPException(status_code=400, detail="X-Coverage-Run-Id is required (CLI compatibility requires explicit legacy mode)")
+    target_url = None
     if run_id is not None:
         analyzer = getattr(request.app.state, "coverage_analyzer", None)
         if not callable(analyzer):
             raise HTTPException(status_code=503, detail="Coverage analyzer is unavailable")
         try:
-            snapshot = await load_run_snapshot(session, run_id)
             if not principal.admin:
-                await ensure_visible_snapshot(session, snapshot.id, require_grant=True, **visibility_kwargs(principal))
+                await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
+            snapshot = await load_run_snapshot(session, run_id)
+            service = await session.get(GraphQLService, snapshot.service_id)
+            if service is None:
+                raise NotFoundError("GraphQL service not found")
+            target_url = service.endpoint_url
         except NotFoundError:
             raise HTTPException(status_code=404, detail="Coverage run or schema snapshot not found") from None
         except ConflictError:
@@ -144,35 +163,52 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
         except Exception:
             raise HTTPException(status_code=503, detail="Coverage storage is unavailable") from None
 
-    try:
+    if not target_url:
+        if not legacy_enabled():
+            raise HTTPException(status_code=409, detail="Service endpoint is not configured; set endpointUrl before starting a run")
         target_url = target_graphql_url()
-        target = httpx.URL(target_url)
-        # HTTPX normalizes away empty userinfo; inspect the original authority too.
-        has_userinfo = "@" in urlsplit(target_url).netloc
-    except (httpx.InvalidURL, ValueError):
-        raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured correctly") from None
-    if target.scheme not in {"http", "https"} or not target.host or has_userinfo:
-        raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured correctly")
+    try:
+        destination = await validate_endpoint(target_url)
+        target = destination.url
+    except UnsafeEndpoint:
+        raise HTTPException(status_code=503, detail="GraphQL upstream destination is unavailable or not permitted") from None
 
-    body = await request.body()
+    chunks = bytearray()
+    try:
+        async with asyncio.timeout(10):
+            async for chunk in request.stream():
+                if len(chunks) + len(chunk) > MAX_REQUEST_BYTES:
+                    raise HTTPException(status_code=413, detail="GraphQL request exceeds the size limit")
+                chunks.extend(chunk)
+    except TimeoutError:
+        raise HTTPException(status_code=408, detail="GraphQL request body timed out") from None
+    body = bytes(chunks)
     allow_cookies = trusted_e2e_cookies(request, principal)
     headers = forwarded_headers(httpx.Headers(request.headers.raw), strip_forwarding=True,
                                 allow_cookies=allow_cookies)
     started = time.perf_counter()
     try:
-        # A separate cookie jar per request prevents cross-client session leakage.
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, trust_env=False) as client:
-            client.headers.clear()
-            async with client.stream("POST", target, content=body, headers=headers) as upstream:
-                # Raw bytes retain Content-Encoding, even for encodings httpx cannot decode.
-                content = b"".join([chunk async for chunk in upstream.aiter_raw()])
-                duration_ms = max(0, int((time.perf_counter() - started) * 1000))
-                response = Response(content=content, status_code=upstream.status_code)
-                response.raw_headers.extend(forwarded_headers(upstream.headers, allow_cookies=allow_cookies))
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="GraphQL upstream timed out") from None
+        # No shared cookie jar, socket pool, DNS resolution or automatic retry.
+        async with outbound_slot(), asyncio.timeout(30):
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, trust_env=False,
+                                         transport=PinnedTransport(destination)) as client:
+                client.headers.clear()
+                async with client.stream("POST", target, content=body, headers=headers) as upstream:
+                    content_buffer = bytearray()
+                    async for chunk in upstream.aiter_raw():
+                        if len(content_buffer) + len(chunk) > MAX_RESPONSE_BYTES:
+                            raise UpstreamTooLarge()
+                        content_buffer.extend(chunk)
+                    content = bytes(content_buffer)
+                    duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+                    response = Response(content=content, status_code=upstream.status_code)
+                    response.raw_headers.extend(forwarded_headers(upstream.headers, allow_cookies=allow_cookies))
+    except UpstreamTooLarge:
+        raise HTTPException(status_code=502, detail="Upstream response exceeds the size limit; upstream may have executed the request. Do not retry automatically.") from None
+    except (httpx.TimeoutException, TimeoutError):
+        raise HTTPException(status_code=504, detail="GraphQL upstream timed out; upstream may have executed the request. Do not retry automatically.") from None
     except httpx.RequestError:
-        raise HTTPException(status_code=502, detail="GraphQL upstream request failed") from None
+        raise HTTPException(status_code=502, detail="GraphQL upstream request failed; upstream may have executed the request. Do not retry automatically.") from None
 
     if run_id is not None:
         try:

@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from app.proxy import forwarded_headers
+from test_proxy_e2e import capture_context  # noqa: F401
 from test_graphql_proxy import client, raw_response, upstream  # noqa: F401
 
 
@@ -23,10 +24,10 @@ def test_header_filter_denies_all_cookie_variants_by_default():
     {"Sec-Fetch-Mode": "cors"},
     {"Sec-Fetch-Dest": "empty"},
 ])
-async def test_browser_context_cannot_enable_cookies_even_with_valid_api_key(browser_headers, client, upstream):
+async def test_browser_context_cannot_enable_cookies_even_with_valid_api_key(browser_headers, client, upstream, capture_context):
     requests = upstream(lambda request: raw_response(headers={"Set-Cookie": "another_app=overwrite; Path=/"}))
     response = await client.post("/graphql", content=b"{}", headers={
-        **browser_headers, "Cookie": "portal_session=secret; arbitrary_cookie=secret",
+        **browser_headers, "X-Coverage-Run-Id": str(capture_context.run.id), "Cookie": "portal_session=secret; arbitrary_cookie=secret",
     })
     assert response.status_code == 200
     assert "cookie" not in requests[0].headers

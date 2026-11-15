@@ -30,6 +30,9 @@ class GraphQLService(Base):
     key: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    endpoint_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

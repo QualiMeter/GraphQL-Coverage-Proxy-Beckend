@@ -8,19 +8,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import (
     CoverageGraph, RequestOut, RunCreate, RunOut, SchemaImport, SchemaIntrospectionImport,
-    SchemaOut, ServiceCreate, ServiceOut, ServiceVisibilityUpdate,
+    SchemaOut, ServiceCreate, ServiceOut, ServiceUpdate,
     OperationOut, OperationType, RunStats,
 )
 from app.access import require_operator, require_analyst
 from app.auth import Principal, current_principal, visibility_kwargs
 from app.config import target_graphql_url
+from app.upstream import UnsafeEndpoint, validate_endpoint, legacy_enabled
 from app.database import get_session
 from app.run_analytics import get_run_stats, list_operations
 from app.schema_collector import (
     InvalidIntrospectionResponseError, InvalidSchemaTargetURLError, SchemaConnectionError,
 )
 from app.services import (
-    ConflictError, NotFoundError, change_service_visibility, create_run, create_service,
+    ConflictError, NotFoundError, update_service, get_service, create_run, create_service,
     ensure_visible_run, ensure_visible_service, ensure_visible_snapshot, finish_run,
     get_graph, get_run_graph, import_introspection_schema, import_sdl,
     list_requests, list_runs, list_schemas, list_services,
@@ -47,7 +48,12 @@ def api_errors(exc: Exception) -> HTTPException:
 async def post_service(payload: ServiceCreate, session: AsyncSession = Session,
                        principal: Principal = Depends(require_operator)):
     try:
-        return await create_service(session, payload.key, payload.name, payload.is_public, owner_id=principal.user_id)
+        destination = await validate_endpoint(payload.endpoint_url)
+        return await create_service(session, payload.key, payload.name, payload.is_public,
+                                    owner_id=principal.user_id, endpoint_url=str(destination.url),
+                                    description=payload.description)
+    except UnsafeEndpoint:
+        raise HTTPException(status_code=422, detail="Endpoint is not permitted by the outbound security policy") from None
     except ConflictError as exc:
         raise api_errors(exc) from exc
 
@@ -57,20 +63,42 @@ async def get_services(session: AsyncSession = Session, principal: Principal = D
     kwargs = {"public_only": not principal.admin}
     if principal.user_id is not None and not principal.admin:
         kwargs["user_id"] = principal.user_id
-    return await list_services(session, **kwargs)
+    return await list_services(session, include_endpoint=principal.admin or principal.role == "operator", **kwargs)
+
+
+@router.get("/services/{service_id}", response_model=ServiceOut)
+async def get_service_detail(service_id: uuid.UUID, session: AsyncSession = Session,
+                             principal: Principal = Depends(current_principal)):
+    try:
+        await ensure_visible_service(session, service_id, **visibility_kwargs(principal))
+        include_endpoint = principal.admin
+        if principal.role == "operator":
+            try:
+                await ensure_visible_service(session, service_id, require_grant=True, **visibility_kwargs(principal))
+                include_endpoint = True
+            except NotFoundError:
+                pass
+        return await get_service(session, service_id, include_endpoint=include_endpoint)
+    except NotFoundError as exc:
+        raise api_errors(exc) from exc
 
 
 @router.patch(
     "/services/{service_id}", response_model=ServiceOut,
 )
-async def patch_service_visibility(
-    service_id: uuid.UUID, payload: ServiceVisibilityUpdate, session: AsyncSession = Session,
+async def patch_service(
+    service_id: uuid.UUID, payload: ServiceUpdate, session: AsyncSession = Session,
     principal: Principal = Depends(require_operator),
 ):
     try:
         await ensure_visible_service(session, service_id, require_grant=True, **visibility_kwargs(principal))
-        return await change_service_visibility(session, service_id, payload.is_public)
-    except NotFoundError as exc:
+        changes = payload.model_dump(exclude_unset=True)
+        if "endpoint_url" in changes:
+            changes["endpoint_url"] = str((await validate_endpoint(changes["endpoint_url"])).url)
+        return await update_service(session, service_id, changes)
+    except UnsafeEndpoint:
+        raise HTTPException(status_code=422, detail="Endpoint is not permitted by the outbound security policy") from None
+    except (NotFoundError, ConflictError) as exc:
         raise api_errors(exc) from exc
 
 
@@ -94,14 +122,17 @@ async def post_introspection_schema(
     payload: SchemaIntrospectionImport, session: AsyncSession = Session,
     principal: Principal = Depends(require_operator),
 ):
-    # Clients cannot select an arbitrary target; the same configured upstream
-    # is used for the /graphql proxy and schema introspection.
-    target_url = target_graphql_url()
-    if not target_url:
-        raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured")
+    # Do not import a global upstream schema into a configured service. Service
+    # introspection is stage 3; stage 2 supports SDL and explicit legacy only.
     try:
         if not principal.admin:
             await ensure_visible_service(session, payload.service_id, require_grant=True, **visibility_kwargs(principal))
+        service = await get_service(session, payload.service_id)
+        if service.endpoint_url or not legacy_enabled():
+            raise HTTPException(status_code=409, detail="Use SDL import for configured services until service introspection is available")
+        target_url = target_graphql_url()
+        if not target_url:
+            raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured")
         return await import_introspection_schema(session, payload.service_id, target_url)
     except NotFoundError as exc:
         raise api_errors(exc) from exc

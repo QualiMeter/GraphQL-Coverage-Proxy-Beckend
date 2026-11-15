@@ -16,6 +16,7 @@ from graphql import (
 from graphql.type.schema import GraphQLSchema
 
 from app.schema_parser import ParsedSchema, parse_sdl
+from app.upstream import validate_endpoint, UnsafeEndpoint, PinnedTransport, MAX_RESPONSE_BYTES
 
 if TYPE_CHECKING:
     import httpx
@@ -71,13 +72,31 @@ async def collect_schema(
     if url.scheme not in ("http", "https") or not url.host or has_userinfo:
         raise InvalidSchemaTargetURLError("Configured GraphQL endpoint URL is invalid")
 
+    if transport is None:
+        try:
+            destination = await validate_endpoint(target_url)
+        except UnsafeEndpoint:
+            raise InvalidSchemaTargetURLError("Configured GraphQL endpoint is not permitted") from None
+        transport = PinnedTransport(destination)
     try:
-        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
-            response = await client.post(
-                url,
-                json={"query": get_introspection_query()},
-            )
-            response.raise_for_status()
+        import asyncio
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=timeout, transport=transport, trust_env=False, follow_redirects=False) as client:
+                async with client.stream("POST", url, json={"query": get_introspection_query()}, headers={"Accept-Encoding": "identity"}) as response:
+                    response.raise_for_status()
+                    if response.headers.get("content-encoding", "identity").lower() != "identity":
+                        raise SchemaConnectionError("Encoded introspection responses are not supported")
+                    data = bytearray()
+                    # Mock transports may return preloaded content; real sockets
+                    # always use raw bounded streaming, without decompression.
+                    chunks = response.aiter_bytes() if response.is_stream_consumed else response.aiter_raw()
+                    async for chunk in chunks:
+                        if len(data) + len(chunk) > MAX_RESPONSE_BYTES:
+                            raise SchemaConnectionError("Introspection response exceeds size limit")
+                        data.extend(chunk)
+                    response = httpx.Response(response.status_code, content=bytes(data))
+    except TimeoutError:
+        raise SchemaConnectionError("Introspection timed out") from None
     except httpx.HTTPStatusError as exc:
         raise SchemaConnectionError(
             f"GraphQL endpoint returned HTTP {exc.response.status_code}"

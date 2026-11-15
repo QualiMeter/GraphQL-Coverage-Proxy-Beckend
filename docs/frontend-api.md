@@ -1,9 +1,10 @@
 # Контракт для фронтенда — GraphQL Coverage API v0.1
 
-Статус: контракт ветки разработки, этап 1 ТЗ v2.0 — серверные cookie-сессии,
-роли и ACL; изменения ещё не выложены на production. Базовые DTO покрытия,
+Статус: контракт ветки разработки, этапы 1–2 ТЗ v2.0 — cookie-сессии,
+роли, ACL и безопасный multi-service proxy; изменения ещё не выложены на production. Базовые DTO покрытия,
 операций и статистики сохранены. **Новые endpoints, DTO SessionOut/UserOut,
 права, CSRF, ошибки и порядок интеграции:** [frontend-auth.md](frontend-auth.md).
+Контракт этапа 2: [frontend-multi-service.md](frontend-multi-service.md).
 План и оставшиеся P0/P1: [v2-implementation-plan.md](v2-implementation-plan.md).
 
 ## 1. Настройки подключения
@@ -44,8 +45,9 @@ Browser session использует HttpOnly cookie и CSRF, см. [контр�
 - Unsafe-запросы с сессией требуют Origin и X-CSRF-Token. Без входа — 401,
   недостаточная роль/CSRF — 403. Существующий fail-closed 503 без настроенного
   ключа и без cookie сохранён для legacy CLI-запросов.
-- В этапе 1 upstream ещё задаёт TARGET_GRAPHQL_URL. Multi-service/SSRF — этап 2.
-  Browser proxy требует run ID. CLI passthrough пока сохранён для совместимости.
+- Upstream определяется по run → snapshot → service.endpointUrl. Run ID обязателен.
+  Без run ID разрешён только доверенный CLI в явном COVERAGE_LEGACY_PROXY=true.
+  Browser proxy всегда требует run ID, даже при наличии API key.
 - API-ответы не кешируются; CORS по умолчанию выключен. Для same-origin cookie не нужен CORS.
 
 ## 2. Последовательность вызовов
@@ -83,7 +85,7 @@ Browser session использует HttpOnly cookie и CSRF, см. [контр�
 анонимно; приватного — с grant либо admin/CLI key. Отзыв публикации/grant
 закрывает следующие чтения, включая исторические прогоны.
 
-Фильтры `/requests`, request detail, multi-service, история serviceId,
+Фильтры `/requests`, request detail, история serviceId,
 analysisStatusCounts, P95, SDL/метаданные и безопасный документ AST входят
 в оставшиеся P0/P1. Сравнение прогонов — P2 и сейчас не реализуется.
 
@@ -96,6 +98,8 @@ analysisStatusCounts, P95, SDL/метаданные и безопасный до
 {
   "key": "demo-api",
   "name": "Demo GraphQL API",
+  "endpointUrl": "https://api.example.com/graphql",
+  "description": "Основной API",
   "isPublic": false
 }
 ```
@@ -108,12 +112,21 @@ analysisStatusCounts, P95, SDL/метаданные и безопасный до
   "key": "demo-api",
   "name": "Demo GraphQL API",
   "isPublic": false,
-  "createdAt": "2026-11-13T13:00:00Z"
+  "createdAt": "2026-11-13T13:00:00Z",
+  "updatedAt": "2026-11-13T13:00:00Z",
+  "endpointUrl": "https://api.example.com/graphql",
+  "description": "Основной API"
 }
 ```
 
 `GET /api/services` без ключа возвращает массив **только опубликованных**
 сервисов. С корректным административным ключом — все сервисы.
+
+`GET /api/services/{serviceId}` возвращает тот же DTO с проверкой ACL.
+`endpointUrl` доступен только admin/CLI или operator с grant; остальным — null.
+`PATCH` поддерживает name, description (null очищает), endpointUrl, isPublic.
+Изменение endpoint при активном run любого snapshot сервиса возвращает 409.
+Пустой PATCH и null для name/endpointUrl/isPublic дают 422.
 
 Чтобы опубликовать сервис, сервер администратора выполняет
 `PATCH /api/services/{serviceId}` с телом `{"isPublic":true}` и
@@ -148,8 +161,10 @@ analysisStatusCounts, P95, SDL/метаданные и безопасный до
 Если та же схема для того же сервиса уже есть, сервер возвращает существующий снимок
 без создания копии. Кроме SDL, реализован
 `POST /api/schemas/import/introspection` с телом
-`{"serviceId":"<UUID>"}`. Адрес upstream задаётся **только** на сервере через
-`TARGET_GRAPHQL_URL`, передать произвольный URL в запросе нельзя.
+`{"serviceId":"<UUID>"}`. До этапа 3 configured-сервисы получают 409 и используют SDL.
+Для старых сервисов с endpointUrl=null introspection разрешена только при явном
+COVERAGE_LEGACY_PROXY=true через TARGET_GRAPHQL_URL с общей SSRF-защитой.
+Передать URL в этом запросе нельзя.
 
 `GET /api/schemas?serviceId={uuid}` возвращает массив снимков, если сервис
 опубликован (либо запрос выполнен администратором).
@@ -165,7 +180,7 @@ analysisStatusCounts, P95, SDL/метаданные и безопасный до
 
 ## 6. Запуск тестового прогона
 
-`POST /api/runs` — только с `X-Coverage-Api-Key`:
+`POST /api/runs` — operator с grant / admin с cookie+CSRF либо доверенный CLI key:
 
 ```json
 {
