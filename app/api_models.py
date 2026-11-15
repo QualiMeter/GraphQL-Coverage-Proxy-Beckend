@@ -55,9 +55,14 @@ class SchemaImport(ApiModel):
 
 
 class SchemaIntrospectionImport(ApiModel):
-    # The upstream address must come from server configuration only.
+    # The upstream address comes only from the selected saved Service.
     model_config = ConfigDict(extra="forbid")
     service_id: uuid.UUID
+
+
+class SchemaImportErrorOut(ApiModel):
+    detail: str
+    code: str = Field(description="Stable introspection error code; no upstream text, URL or credentials.")
 
 
 class SchemaOut(ApiModel):

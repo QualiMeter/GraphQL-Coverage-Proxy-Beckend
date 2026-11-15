@@ -1,24 +1,21 @@
-"""HTTP contract for importing a configured GraphQL endpoint via introspection."""
-
+"""HTTP contract: service ID only; stable sanitized introspection errors."""
 import uuid
 from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 
 import app.api as api
 from app.api_models import SchemaOut
 from app.main import app
 from app.schema_collector import (
-    InvalidIntrospectionResponseError,
-    InvalidSchemaTargetURLError,
-    SchemaConnectionError,
+    InvalidIntrospectionResponseError, InvalidSchemaTargetURLError, SchemaConnectionError,
+    SchemaTimeoutError, IntrospectionDisabledError, SchemaResponseTooLargeError,
 )
-from app.services import NotFoundError
-
+from app.services import NotFoundError, SchemaEndpointChanged, SchemaEndpointNotConfigured, ConflictError
 
 SERVICE_ID = uuid.uuid4()
-TARGET_URL = "https://graphql.example.test/graphql"
 ROUTE = "/api/schemas/import/introspection"
 TEST_ADMIN_KEY = "test-only-coverage-admin-key-" + "a" * 40
 
@@ -26,93 +23,55 @@ TEST_ADMIN_KEY = "test-only-coverage-admin-key-" + "a" * 40
 @pytest.fixture(autouse=True)
 def configured_admin_key(monkeypatch):
     monkeypatch.setenv("COVERAGE_API_KEY", TEST_ADMIN_KEY)
-    monkeypatch.setenv("COVERAGE_LEGACY_PROXY", "true")
-    from types import SimpleNamespace
-    async def get_service(*args, **kwargs):
-        return SimpleNamespace(endpoint_url=None)
-    monkeypatch.setattr(api, "get_service", get_service)
 
 
-def test_introspection_route_uses_config_only_and_returns_snapshot(monkeypatch):
-    invoked: list[tuple] = []
-    monkeypatch.setattr(api, "target_graphql_url", lambda: TARGET_URL)
-
-    async def fake_import(session, service_id, target_url):
-        invoked.append((service_id, target_url))
-        return SchemaOut(
-            id=uuid.uuid4(),
-            service_id=service_id,
-            schema_hash="a" * 64,
-            source="introspection",
-            created_at=datetime.now(timezone.utc),
-        )
-
+def test_introspection_route_accepts_only_service_id_and_returns_snapshot(monkeypatch):
+    invoked = []
+    async def fake_import(sessions, service_id, **kwargs):
+        invoked.append(service_id)
+        return SchemaOut(id=uuid.uuid4(), service_id=service_id, schema_hash="a" * 64,
+                         source="introspection", created_at=datetime.now(timezone.utc))
     monkeypatch.setattr(api, "import_introspection_schema", fake_import)
-
     with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
         response = client.post(ROUTE, json={"serviceId": str(SERVICE_ID)})
-        injected_url = client.post(
-            ROUTE,
-            json={"serviceId": str(SERVICE_ID), "targetUrl": "http://attacker.test/graphql"},
-        )
-
-    assert response.status_code == 201
-    data = response.json()
-    assert data["serviceId"] == str(SERVICE_ID)
-    assert data["source"] == "introspection"
-    assert data["schemaHash"] == "a" * 64
-    assert invoked == [(SERVICE_ID, TARGET_URL)]
-    assert injected_url.status_code == 422
+        assert response.status_code == 201
+        assert response.json()["serviceId"] == str(SERVICE_ID)
+        assert response.json()["source"] == "introspection"
+        assert response.json()["schemaHash"] == "a" * 64
+        for extra in ({"targetUrl": "http://user:private-password@attacker.test"},
+                      {"headers": {"Authorization": "Bearer private-token"}}, {"credentials": "private-secret"}):
+            rejected = client.post(ROUTE, json={"serviceId": str(SERVICE_ID), **extra})
+            assert rejected.status_code == 422
+            assert all(secret not in rejected.text for secret in ("private-password", "private-token", "private-secret"))
+    assert invoked == [SERVICE_ID]
 
 
-def test_introspection_route_requires_configured_target(monkeypatch):
-    monkeypatch.setattr(api, "target_graphql_url", lambda: "")
-
-    async def should_not_run(*_args, **_kwargs):
-        pytest.fail("Collector must not run without a configured endpoint")
-
-    monkeypatch.setattr(api, "import_introspection_schema", should_not_run)
-    with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
-        response = client.post(ROUTE, json={"serviceId": str(SERVICE_ID)})
-
-    assert response.status_code == 503
-    assert response.json()["detail"] == "TARGET_GRAPHQL_URL is not configured"
-
-
-@pytest.mark.parametrize(
-    ("failure", "expected_status", "expected_detail"),
-    [
-        (NotFoundError("GraphQL service not found"), 404, "GraphQL service not found"),
-        (
-            InvalidSchemaTargetURLError("https://user:password@example.test"),
-            503,
-            "TARGET_GRAPHQL_URL is not configured correctly",
-        ),
-        (
-            SchemaConnectionError("https://user:password@example.test"),
-            502,
-            "GraphQL schema introspection failed",
-        ),
-        (
-            InvalidIntrospectionResponseError("GraphQL error: secret data"),
-            502,
-            "GraphQL schema introspection failed",
-        ),
-    ],
-)
-def test_introspection_route_sanitizes_failures(
-    monkeypatch, failure, expected_status, expected_detail
-):
-    monkeypatch.setattr(api, "target_graphql_url", lambda: TARGET_URL)
-
-    async def fake_import(*_args, **_kwargs):
+@pytest.mark.parametrize("failure,status,code", [
+    (NotFoundError("private-host"), 404, "SERVICE_NOT_FOUND"),
+    (SchemaEndpointNotConfigured("private-host"), 409, "SERVICE_ENDPOINT_NOT_CONFIGURED"),
+    (SchemaEndpointChanged("private-host"), 409, "SERVICE_ENDPOINT_CHANGED"),
+    (ConflictError("SQL private-secret"), 409, "SCHEMA_IMPORT_CONFLICT"),
+    (InvalidSchemaTargetURLError("https://user:private-password@private-host"), 409, "UPSTREAM_NOT_ALLOWED"),
+    (SchemaConnectionError("private-host:5432"), 502, "UPSTREAM_UNAVAILABLE"),
+    (SchemaTimeoutError("private-host:5432"), 504, "UPSTREAM_TIMEOUT"),
+    (IntrospectionDisabledError("upstream private-secret"), 409, "INTROSPECTION_DISABLED"),
+    (InvalidIntrospectionResponseError("GraphQL error: private-secret"), 502, "INVALID_INTROSPECTION"),
+    (SchemaResponseTooLargeError("private-secret"), 502, "INTROSPECTION_LIMIT_EXCEEDED"),
+    (SQLAlchemyError("postgresql://user:private-password@private-host"), 503, "SCHEMA_STORAGE_UNAVAILABLE"),
+])
+def test_introspection_route_sanitizes_failures(monkeypatch, failure, status, code):
+    async def fake_import(*args, **kwargs):
         raise failure
-
     monkeypatch.setattr(api, "import_introspection_schema", fake_import)
     with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
         response = client.post(ROUTE, json={"serviceId": str(SERVICE_ID)})
+    assert response.status_code == status and response.json()["code"] == code
+    assert isinstance(response.json()["detail"], str)
+    assert all(secret not in response.text for secret in ("private-password", "private-secret", "private-host"))
+    if code == "INTROSPECTION_DISABLED":
+        assert "SDL" in response.json()["detail"]
 
-    assert response.status_code == expected_status
-    assert response.json()["detail"] == expected_detail
-    assert "password" not in response.text
-    assert "secret data" not in response.text
+
+def test_introspection_payload_is_bounded():
+    with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
+        assert client.post(ROUTE, content=b"x" * 16_385).status_code == 413

@@ -1,7 +1,7 @@
-# Frontend: контракт этапа 2 v2.0
+# Frontend: multi-service и introspection v2.0
 
-База — main `bf9cdb2cdbcbdc7d7fd2f4e41b10ea8f910c641a` (PR #23).
-Только multi-service и proxy P0; production ещё требует отдельного принятия и выкладки.
+Этапы 2–3, база этапа 3 — main `09659aed51f91dd6e93d95a3818497901c96349c` (PR #24).
+Multi-service proxy и introspection; production ещё требует отдельного принятия и выкладки.
 Cookie/CSRF, роли и ACL из [frontend-auth.md](frontend-auth.md) сохраняются.
 Все пути относительные, same-origin; административный ключ остаётся только на сервере.
 
@@ -12,7 +12,7 @@ Cookie/CSRF, роли и ACL из [frontend-auth.md](frontend-auth.md) сохр�
 | GET | `/api/services/{serviceId}` | Новый endpoint, ServiceOut | public/grant/admin, иначе 404 |
 | PATCH | `/api/services/{serviceId}` | name, description, endpointUrl, isPublic | operator с grant / admin |
 | POST | `/graphql` | Run ID определяет upstream | operator с grant / admin / CLI key |
-| POST | `/api/schemas/import/introspection` | Временно 409 для configured-сервиса | До этапа 3 использовать SDL |
+| POST | `/api/schemas/import/introspection` | Выбранный service.endpointUrl; SchemaOut | operator с grant / admin |
 
 ServiceCreate:
 
@@ -42,7 +42,8 @@ key после создания не редактируется. Description п�
 1. Подключить login/session, CSRF и grants согласно этапу 1.
 2. Добавить endpointUrl/description в форму создания и редактирования сервиса.
 3. Обработать nullable/скрытый endpointUrl без подстановки фиктивного значения.
-4. Импортировать SDL выбранного сервиса, создать run по snapshotId.
+4. Импортировать introspection выбранного сервиса (либо SDL), создать run по snapshotId.
+   [Контракт и коды ошибок introspection](frontend-introspection.md).
 5. Для proxy передавать UUID run в X-Coverage-Run-Id. Он выбирает upstream;
    UUID не заменяет cookie/CSRF или разрешение. Для browser run ID обязателен всегда.
 6. Дождаться всех ответов, завершить run, читать существующие coverage/operations/stats.
@@ -55,7 +56,7 @@ key после создания не редактируется. Description п�
 
 Ошибки: 400 — run ID отсутствует/невалиден; 401/403 — auth/роль/CSRF;
 404 — отсутствующая или недоступная запись; 409 — неактивный run/нет endpoint/
-активный run при смене адреса/временно недоступная service introspection;
+активный run при смене адреса; для introspection см. отдельную таблицу ошибок;
 413 — превышен размер; 422 — DTO/URL/DNS не прошёл проверку при сохранении;
 503 — DNS/SSRF destination/storage/capacity недоступны перед отправкой;
 502/504 — ошибка upstream или сохранения после отправки. Для 502/504 операция

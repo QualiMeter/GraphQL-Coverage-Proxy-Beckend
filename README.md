@@ -146,7 +146,7 @@ decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
 
 ## HTTP-прокси GraphQL
 
-Создайте отдельный сервис с обязательным `endpointUrl`, импортируйте его SDL и
+Создайте отдельный сервис с обязательным `endpointUrl`, импортируйте схему через introspection или SDL и
 создайте run. Прокси выбирает адрес через `X-Coverage-Run-Id → TestRun →
 SchemaSnapshot → GraphQLService.endpoint_url`. Переключать глобальное окружение
 при переключении сервисов не требуется. [Контракт frontend](docs/frontend-multi-service.md)
@@ -187,12 +187,34 @@ Browser всегда требует run ID. Legacy по умолчанию вы�
 
 ## Импорт схемы через introspection
 
-Introspection выбранного сервиса — этап 3. Пока сервисы с endpointUrl получают
-409 на `/api/schemas/import/introspection`; используйте `/api/schemas/import`
-с реальным SDL. Это предотвращает импорт глобальной схемы в чужой сервис.
-Для исторических сервисов с NULL endpoint старый путь доступен только при
-COVERAGE_LEGACY_PROXY=true и TARGET_GRAPHQL_URL с SSRF-защитой. URL в JSON
-не принимается. Права operator/admin + grant, cookie/CSRF или доверенный CLI key.
+`POST /api/schemas/import/introspection` принимает только `{"serviceId":"<UUID>"}`,
+находит сохранённый endpointUrl сервиса и выполняет стандартный introspection query.
+Настроенные сервисы всегда используют свой адрес, независимо от глобального target.
+Operator требует grant, admin может импортировать любой сервис. Browser использует
+cookie+Origin+CSRF; URL, credentials и произвольные headers в JSON не принимаются.
+Входящие cookies/CSRF/API key/Authorization не передаются upstream.
+
+```bash
+curl --fail-with-body -sS http://localhost:8000/api/schemas/import/introspection \
+  -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
+  -H 'Content-Type: application/json' -d '{"serviceId":"<service UUID>"}'
+```
+
+Ответ 201 — существующий SchemaOut. Дедупликация serviceId + schemaHash сохраняет
+snapshot ID; SDL-снимок с тем же hash обогащается source/introspection metadata
+без изменения исторических полей/runs/observations. Конкурентные SDL/introspection
+импорты сериализованы service lock, все flush защищены savepoint; миграция не нужна.
+Смена endpoint во время fetch возвращает 409 без сохранения старой схемы.
+
+Сохраняются SSRF/DNS pinning, TLS verification, запреты redirects/retries/proxies,
+лимиты 8 МиБ / 15 с на fetch и общий с proxy лимит 16 jobs/worker. Нормализация
+в worker thread имеет отдельные пределы размера/сложности. Поддержан identity encoding.
+Ошибки содержат безопасный строковый detail и стабильный code; отключённая
+introspection — 409 INTROSPECTION_DISABLED с предложением ручного SDL.
+Закрытые API с upstream-аутентификацией пока требуют SDL: токены не хранятся.
+Legacy fallback для NULL endpoint — только explicit COVERAGE_LEGACY_PROXY=true.
+[Frontend-контракт и таблица ошибок](docs/frontend-introspection.md),
+[архитектура/ограничения](docs/service-introspection.md).
 
 ## Обращение фронтенда
 

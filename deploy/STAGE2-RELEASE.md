@@ -37,7 +37,9 @@ repository variables, Nginx и работающие контейнеры в эт
    HTTP/private upstream в production преднамеренно запрещены; dev false
    зафиксирован production Compose. Внутренние upstream потребуют отдельного
    согласованного проектирования, а не отключения SSRF.
-6. До этапа 3 configured-сервисы импортируют SDL: introspection для них 409.
+6. Начиная с этапа 3 configured-сервисы импортируют introspection собственного
+   endpoint. При INTROSPECTION_DISABLED (409) или необходимости upstream credentials
+   используется ручной SDL; см. [контракт](../docs/frontend-introspection.md).
 
 Rollback приложения не требует downgrade: nullable новые поля старая версия
 игнорирует. Однако старая версия снова маршрутизирует глобально; **остановить

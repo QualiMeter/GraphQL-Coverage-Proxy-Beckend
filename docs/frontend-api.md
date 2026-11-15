@@ -1,10 +1,11 @@
 # Контракт для фронтенда — GraphQL Coverage API v0.1
 
-Статус: контракт ветки разработки, этапы 1–2 ТЗ v2.0 — cookie-сессии,
-роли, ACL и безопасный multi-service proxy; изменения ещё не выложены на production. Базовые DTO покрытия,
+Статус: контракт ветки разработки, этапы 1–3 ТЗ v2.0 — cookie-сессии,
+роли, ACL, безопасный multi-service proxy и service introspection; изменения ещё не выложены на production. Базовые DTO покрытия,
 операций и статистики сохранены. **Новые endpoints, DTO SessionOut/UserOut,
 права, CSRF, ошибки и порядок интеграции:** [frontend-auth.md](frontend-auth.md).
-Контракт этапа 2: [frontend-multi-service.md](frontend-multi-service.md).
+Контракт multi-service: [frontend-multi-service.md](frontend-multi-service.md).
+Introspection и коды ошибок этапа 3: [frontend-introspection.md](frontend-introspection.md).
 План и оставшиеся P0/P1: [v2-implementation-plan.md](v2-implementation-plan.md).
 
 ## 1. Настройки подключения
@@ -161,10 +162,13 @@ analysisStatusCounts, P95, SDL/метаданные и безопасный до
 Если та же схема для того же сервиса уже есть, сервер возвращает существующий снимок
 без создания копии. Кроме SDL, реализован
 `POST /api/schemas/import/introspection` с телом
-`{"serviceId":"<UUID>"}`. До этапа 3 configured-сервисы получают 409 и используют SDL.
-Для старых сервисов с endpointUrl=null introspection разрешена только при явном
-COVERAGE_LEGACY_PROXY=true через TARGET_GRAPHQL_URL с общей SSRF-защитой.
-Передать URL в этом запросе нельзя.
+`{"serviceId":"<UUID>"}`. Адрес берётся из endpointUrl выбранного сервиса;
+настроенные сервисы всегда используют свой адрес. URL, headers и credentials в
+теле запрещены. Для старых NULL endpoint остаётся только явный legacy fallback.
+Ошибки имеют строковый detail и стабильный code; отключённая introspection —
+409 INTROSPECTION_DISABLED с предложением SDL. Полная [таблица и DTO](frontend-introspection.md).
+Повторный hash возвращает тот же snapshot; совпавший SDL-снимок обогащается
+source/introspection metadata без изменения IDs полей, runs и observations.
 
 `GET /api/schemas?serviceId={uuid}` возвращает массив снимков, если сервис
 опубликован (либо запрос выполнен администратором).

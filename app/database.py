@@ -31,3 +31,8 @@ SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with SessionFactory() as session:
         yield session
+
+
+def get_session_factory():
+    """Inject a factory, not a request-long session, for multi-phase work."""
+    return SessionFactory

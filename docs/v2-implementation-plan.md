@@ -79,3 +79,15 @@ Introspection выбранного endpoint относится к этапу 3. 
 общую SSRF-защиту. Остальные история/аналитика/P95/безопасный AST и P2 не добавлялись.
 [Frontend delta](frontend-multi-service.md), [SSRF](multi-service-security.md),
 [E2E](multi-service-e2e.md), [будущий release](../deploy/STAGE2-RELEASE.md).
+
+## Этап 3: service-aware introspection
+
+База main 09659aed51f91dd6e93d95a3818497901c96349c (PR #24), ветка
+codex/v2-service-introspection. Временный запрет configured-service introspection
+снят: endpoint выбирает Service, используется существующий DNS-pinned transport.
+Nullable endpoint сохраняет только explicit legacy fallback. Новых миграций нет.
+Dedup/enrichment атомарны под service lock/savepoint; endpoint change во время
+fetch отклоняет запись, конкурентные SDL/introspection возвращают один snapshot.
+[Frontend delta](frontend-introspection.md), [архитектура/лимиты/upstream auth](service-introspection.md).
+SDL download/displayName/расширенные schema DTO, история и P1-аналитика остаются
+последующими работами; P2 не начат.
