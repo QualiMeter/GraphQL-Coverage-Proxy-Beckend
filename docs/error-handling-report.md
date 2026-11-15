@@ -180,3 +180,97 @@ extensions API, не добавляет columns/DTO/endpoints. Существу�
 
 Модели БД, Alembic, Nginx, Docker Compose, deployment script, Variables/Secrets
 не изменены. Merge, deployment и подключение к production не выполнялись.
+
+## Исправление замечания независимого ревью PR #30: best-effort диагностика
+
+Проверенный HEAD до исправления:
+`b8098434157ea4638a993a2a5b1a21cd9726f2f6`. Работа продолжена в той же ветке
+`codex/safe-error-diagnostics`; обновляется существующий PR #30.
+
+### Причина и решение
+
+Первоначальный helper выполнял чтение SQLSTATE и `logger.error` внутри исходного
+`except`. Исключение accessor/handler прерывало возврат безопасного ответа.
+Кроме того, стандартный `StreamHandler.emit` сам ловит ошибки formatter/write/
+flush и вызывает `handleError`: при `logging.raiseExceptions=True` traceback
+может включать контекст исходного DBAPIError с SQL, параметрами и секретами.
+Поэтому одного внешнего `except` вокруг logger недостаточно.
+
+`app/diagnostics.py` теперь собирает прежние allowlisted метаданные best effort.
+Сбой SQLSTATE accessor оставляет событие без необязательного SQLSTATE. Ошибки
+сериализации/очереди поглощаются без fallback-вывода. `BaseException`, включая
+`CancelledError`, на request path не перехватывается.
+
+В очередь размером 128 помещаются только JSON message и словарь безопасных
+метаданных. Exception object, traceback и request context не передаются.
+Один daemon thread на процесс отправляет события из отдельного контекста;
+блокирующий sink не выполняет I/O на event loop. Очередь не создаёт новые
+потоки для запросов и не ждёт освобождения места: при переполнении событие
+отбрасывается. Ошибка handler/filter не останавливает обработку HTTP или
+consumer. Повторных upstream-вызовов нет.
+
+Изолированный logger `app.diagnostics` уровня ERROR имеет собственный
+`_SafeStreamHandler` и `propagate=False`: непроверенные parent/root handlers и
+lastResort не используются. Handler подавляет ошибки emit, а его `handleError`
+намеренно ничего не печатает. Глобальный `logging.raiseExceptions` не меняется.
+Штатный JSON и `LogRecord.diagnostic`, stage/type/UUID/SQLSTATE сохранены.
+Реальная конфигурация `app.server.server_config().load()` с повторным
+`configure_logging()` проверена subprocess-тестом: событие видно ровно один раз.
+
+### Файлы и новые тесты
+
+В этом follow-up изменены только:
+
+- `app/diagnostics.py`: защищённый logging path и bounded best-effort доставка.
+- `tests/conftest.py`: pytest caplog явно подключён к изолированному logger;
+  ограниченное ожидание доставки выполняется только при инспекции тестовых
+  записей/teardown. Прежние проверки конфиденциальности сохранены.
+- `tests/test_diagnostics_best_effort.py`: 15 новых cases на HTTP boundaries.
+- `docs/error-handling-report.md`: результаты и ограничения этого исправления.
+
+Новые cases покрывают: OSError в emit; исключение SQLSTATE accessor;
+formatter/write/stderr flush с `logging.raiseExceptions=True`; прежние
+502/503/504 и analyzer/document fallback; ошибку enqueue; заблокированный sink
+и заполненную очередь; 12 конкурентных run UUID, отмену одного запроса и сброс
+ContextVar; реальную конфигурацию Uvicorn. Синхронизация конкурентности основана
+на Event/barrier, а watchdog timeout только прерывает зависание. Тест не требует
+достижения произвольного порога latency. Проверяются число upstream-вызовов,
+точные HTTP-коды/тела, лог и stderr с canaries SQL/параметров/секретов. Успешный
+proxy response по-прежнему передаёт upstream body без изменений; запрет
+раскрытия body относится к диагностике и безопасным error responses.
+
+До изменения production-кода добавлены и выполнены первые пять HTTP-регрессий:
+**5 failed** на `b809843`: два фактических HTTP 500 вместо 502 и три случая
+SQL/parameters/exception-message leakage в stderr. После исправления эти
+случаи проходят; прежние privacy assertions не ослаблялись.
+
+### Проверки follow-up
+
+Полный локальный run: **623 passed, 0 skipped**, 248.59 s
+(395 unit/security + 228 PostgreSQL integration). Единственное warning —
+прежнее Starlette/httpx deprecation. Финальный CI указан в описании PR и
+итоговом отчёте. Дополнительный run с graphql-core 3.2.14:
+**66 passed** (новые регрессии, прежняя диагностика, parser и safe document).
+`pip check`, компиляция изменённых Python-файлов и `git diff --check` проходят.
+Полный набор использует Python 3.12 и PostgreSQL 16 с отдельными свежими
+`best_effort_app` / `best_effort_tests` на localhost:56546.
+Docker daemon локально недоступен и вне sandbox; локальный Docker smoke не
+выполнен. Реальный Docker/Nginx/Uvicorn auth smoke проверяется GitHub Actions.
+
+### Остаточные ограничения
+
+Доставка best effort не является durable audit log: очередь может терять события
+при переполнении, неисправном sink или завершении процесса. Request path не
+ожидает flush/join. Проверена существующая конфигурация Uvicorn; сторонние
+pre-fork hosts и внешняя перенастройка private logger не являются проверенными
+deployment-конфигурациями. Production fault injection/load test не проводились.
+
+Отдельная подтверждённая задача, существовавшая до PR #30: на graphql-core
+3.2.14 `type Query { f: In } input In { x: String }` вызывает TypeError при
+построении схемы и может дать HTTP 500. Она намеренно не исправлена здесь:
+PR #30 не обещает классификацию всех вариантов невалидного SDL. Это отдельная
+задача от GraphQL error details для PR #31, описанной выше.
+
+Модели БД, миграции, ACL/CSRF/SSRF, транзакции, публичные контракты, Nginx,
+Compose, deployment scripts и GitHub Variables/Secrets не менялись.
+Merge, production deployment и подключения к production не выполнялись.
