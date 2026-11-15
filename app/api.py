@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from graphql import GraphQLError
@@ -13,10 +13,10 @@ from app.api_models import (
     SchemaOut, SchemaImportErrorOut, ServiceCreate, ServiceOut, ServiceUpdate,
     OperationOut, OperationType, RunStats,
 )
-from app.access import require_operator, require_analyst
+from app.access import require_operator, require_analyst, require_role
 from app.auth import Principal, current_principal, visibility_kwargs
 from app.upstream import UnsafeEndpoint, validate_endpoint
-from app.database import get_session
+from app.database import get_session, get_session_factory
 from app.run_analytics import get_run_stats, list_operations
 from app.schema_collector import SchemaCollectionError
 from app.services import (
@@ -31,6 +31,16 @@ router = APIRouter(prefix="/api", tags=["Coverage API"],
                    responses={401: {"description": "Authentication required for protected operations"},
                               403: {"description": "Insufficient role or invalid Origin/CSRF"}})
 Session = Depends(get_session)
+
+
+async def introspection_principal(request: Request, sessions=Depends(get_session_factory)) -> Principal:
+    # Authentication must also release its connection before the endpoint waits
+    # on HTTP. The ordinary request-scoped get_session dependency cannot do so.
+    async with sessions() as session:
+        return await current_principal(request, session)
+
+
+require_introspection_operator = require_role("operator", principal_dependency=introspection_principal)
 
 
 def api_errors(exc: Exception) -> HTTPException:
@@ -129,15 +139,21 @@ async def post_schema(payload: SchemaImport, session: AsyncSession = Session,
                 "Errors preserve string detail and add a stable code. INTROSPECTION_DISABLED (409) recommends manual SDL import.",
 )
 async def post_introspection_schema(
-    payload: SchemaIntrospectionImport, session: AsyncSession = Session,
-    principal: Principal = Depends(require_operator),
+    payload: SchemaIntrospectionImport, request: Request, sessions=Depends(get_session_factory),
+    principal: Principal = Depends(require_introspection_operator),
 ):
     def failure(status: int, code: str, detail: str):
         return JSONResponse(status_code=status, content={"detail": detail, "code": code})
+    async def authorize(session: AsyncSession):
+        # Re-read role, session revocation/expiry and grant in each short phase;
+        # the Principal captured before HTTP is not authorization for the write.
+        current = await current_principal(request, session)
+        await require_operator(request, principal=current)
+        if not current.admin:
+            await ensure_visible_service(session, payload.service_id, require_grant=True, **visibility_kwargs(current))
+
     try:
-        if not principal.admin:
-            await ensure_visible_service(session, payload.service_id, require_grant=True, **visibility_kwargs(principal))
-        return await import_introspection_schema(session, payload.service_id)
+        return await import_introspection_schema(sessions, payload.service_id, authorize=authorize)
     except NotFoundError:
         return failure(404, "SERVICE_NOT_FOUND", "GraphQL service not found")
     except SchemaEndpointNotConfigured:
@@ -150,7 +166,7 @@ async def post_introspection_schema(
         # Never serialize str(exc), SQL details, response bodies or URLs.
         return failure(exc.status_code, exc.code, exc.public_detail)
     except SQLAlchemyError:
-        await session.rollback()
+        # The owned session/transaction contexts already rolled back and closed.
         return failure(503, "SCHEMA_STORAGE_UNAVAILABLE", "Schema storage is temporarily unavailable")
 
 

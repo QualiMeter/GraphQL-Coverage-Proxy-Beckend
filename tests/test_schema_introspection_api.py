@@ -27,7 +27,7 @@ def configured_admin_key(monkeypatch):
 
 def test_introspection_route_accepts_only_service_id_and_returns_snapshot(monkeypatch):
     invoked = []
-    async def fake_import(session, service_id):
+    async def fake_import(sessions, service_id, **kwargs):
         invoked.append(service_id)
         return SchemaOut(id=uuid.uuid4(), service_id=service_id, schema_hash="a" * 64,
                          source="introspection", created_at=datetime.now(timezone.utc))
@@ -60,7 +60,7 @@ def test_introspection_route_accepts_only_service_id_and_returns_snapshot(monkey
     (SQLAlchemyError("postgresql://user:private-password@private-host"), 503, "SCHEMA_STORAGE_UNAVAILABLE"),
 ])
 def test_introspection_route_sanitizes_failures(monkeypatch, failure, status, code):
-    async def fake_import(*args):
+    async def fake_import(*args, **kwargs):
         raise failure
     monkeypatch.setattr(api, "import_introspection_schema", fake_import)
     with TestClient(app, headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:

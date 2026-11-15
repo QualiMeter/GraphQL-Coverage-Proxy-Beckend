@@ -13,7 +13,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import proxy
-from app.database import get_session
+from app.database import get_session, get_session_factory
 from app.main import app
 from app.models import GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
 from app.services import ConflictError, create_run, create_service, finish_run, import_sdl, update_service
@@ -60,6 +60,7 @@ async def routed_client(isolated_database, monkeypatch):
     async def dependency():
         async with isolated_database() as session:
             yield session
+    app.dependency_overrides[get_session_factory] = lambda: isolated_database
     app.dependency_overrides[get_session] = dependency
     app.dependency_overrides[proxy.get_proxy_session] = dependency
     try:
@@ -67,6 +68,7 @@ async def routed_client(isolated_database, monkeypatch):
                                      headers={"X-Coverage-Api-Key": TEST_ADMIN_KEY}) as client:
             yield client
     finally:
+        app.dependency_overrides.pop(get_session_factory, None)
         app.dependency_overrides.pop(get_session, None)
         app.dependency_overrides.pop(proxy.get_proxy_session, None)
 

@@ -41,16 +41,33 @@ Service row FOR UPDATE сериализует сохранение SDL/introspec
 полей, runs и observations. Обогащаются source и introspection_json; сохраняется
 только data.__schema, без посторонних response extensions/errors/data.
 Endpoint change во время fetch возвращает 409 SERVICE_ENDPOINT_CHANGED без записи
-устаревшей схемы. HTTP выполняется без удержания service row lock.
-Coverage Engine, /graphql и модель авторизации не изменены.
+устаревшей схемы. HTTP выполняется без удержания service row lock и PostgreSQL
+connection: cookie authentication закрывает свою короткую сессию; отдельная
+read-фаза закрывается до collect_schema, write-фаза открывает новую сессию.
+Перед сохранением повторно проверяются актуальные session/роль/активность/grant
+и endpoint. При отзыве прав импорт отклоняется без частичных схем.
+
+Внутренний import_introspection_schema принимает factory новых AsyncSession.
+Он не завершает и не коммитит/откатывает постороннюю caller session с dirty/new/
+flushed изменениями. Импортируемый Service должен быть committed отдельно;
+автоматической публикации caller pending-записей нет. SchemaOut материализуется
+до commit, без post-commit refresh и новой транзакции.
+Coverage Engine, /graphql и правила авторизации не изменены.
 
 ## Проверки
 
 Локально Python 3.12.3 / PostgreSQL 18.6:
 
-- Полный pytest: **367 passed**, без skipped, 1 существующее предупреждение
+- Полный pytest после исправления жизненного цикла сессий: **380 passed**, без skipped, 1 существующее предупреждение
   Starlette/httpx deprecation. Включены все прежние auth/multi-service/coverage
-  проверки и новые unit/PostgreSQL integration.
+  проверки и новые unit/PostgreSQL integration (299 unit, 81 integration).
+- Регрессия на PostgreSQL pool_size=1/max_overflow=0: **11 passed**. Для cookie
+  и API-key клиента независимый DB-запрос выполняется до освобождения медленного
+  upstream; проверены fresh grant/роль/session/expiry/user activity/endpoint,
+  удаление сервиса, отмена запроса и отсутствие pool checkout после возврата.
+- Отдельные проверки caller work: dirty объект, unflushed новая запись и flushed
+  незакоммиченная запись сохраняются в чужой транзакции при успехе и ошибке импорта;
+  другой observer не видит их до явного caller commit.
 - Расширенный сквозной тест: **1 passed** — два настоящих TCP upstream, импорт
   схем A/B, dedup/enrichment с сохранением истории, затем Run → /graphql →
   реальный upstream B → Coverage 2/3 → finish. Выполнен после полного прогона.
@@ -118,4 +135,10 @@ Production, Nginx, Docker/PostgreSQL на VPS, secrets, autodeploy settings не
 - `docs/service-introspection.md`
 - `docs/v2-stage3-report.md`
 - `tests/test_introspection_security.py`
+- `tests/test_introspection_transactions_postgres.py`
 - `tests/test_service_introspection_postgres.py`
+
+Доработка по ревью PR #25 дополнительно меняет внутреннюю передачу session factory
+в app/access.py, app/api.py, app/database.py, app/services.py и тестовых fixtures.
+Внешние endpoints, DTO, OpenAPI security и миграции не меняются. Финальные HEAD/CI
+фиксируются в PR; новый PR и production deploy не создаются.

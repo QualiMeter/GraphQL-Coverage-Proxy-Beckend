@@ -56,20 +56,42 @@ UPSTREAM_GRAPHQL_ERRORS/UPSTREAM_HTTP_ERROR. HTTP 401/403 сам по себе �
 
 ## Атомарность и конкурентность
 
-HTTP и проверка схемы происходят до service row FOR UPDATE. Блокировка берётся
-только для сохранения; её используют SDL и introspection. После lock повторно
-проверяется captured endpoint: при изменении — 409 SERVICE_ENDPOINT_CHANGED,
-без записи схемы со старого адреса. Concurrent endpoint edit не требует держать
-DB lock во время сетевого ожидания и не блокирует /graphql.
+Introspection получает фабрику новых AsyncSession, а не живую request/caller
+session. Cookie authentication тоже читает пользователя в собственной короткой
+сессии, закрытой до выполнения endpoint. Политика роли/CSRF остаётся общей.
 
-Весь набор snapshot/type/field, включая первый flush, находится в savepoint.
-При ошибке откатывается импорт без частичных строк; низкоуровневая функция не
-откатывает чужие pending изменения вызывающей session. См. официальную
+1. В короткой read-транзакции повторно проверяются аутентификация, operator/admin
+   и grant; читаются endpoint и legacy fallback в обычные строковые значения.
+   Транзакция и сессия закрываются до DNS/HTTP/нормализации, возвращая connection в pool.
+2. collect_schema не имеет AsyncSession/connection и не удерживает PostgreSQL
+   checkout во время ожидания upstream. Это относится и к cookie-клиенту, и к CLI key.
+3. Сохранение открывает новую короткую сессию и write-транзакцию. После service
+   row FOR UPDATE заново читаются пользователь/роль/активность, BrowserSession
+   (отзыв/expiry) и service grant, затем сравнивается captured endpoint. Отзыв
+   доступа отклоняет импорт до записи и до выдачи сведений об изменённом endpoint.
+4. Весь набор snapshot/type/field, включая первый flush, защищён savepoint.
+   После успешного write commit обе сессии закрыты. SchemaOut материализуется
+   до commit: post-commit refresh/lazy load не открывает лишнюю транзакцию.
+
+При изменении endpoint — 409 SERVICE_ENDPOINT_CHANGED без старой схемы. При
+отзыве grant — безопасный 404, смене роли — 403, отзыве/истечении сессии или
+блокировке пользователя — 401. Смена endpoint вместе с отзывом grant тоже
+возвращает 404. Проверки актуальны на момент write-транзакции; после её commit
+обычные ACL-чтения по-прежнему ограничивают доступ к сохранённому snapshot.
+
+Низкоуровневый import_introspection_schema(sessions, service_id, authorize=...)
+требует фабрику **новых** сессий; API передаёт общий authorization callback для
+обеих фаз. Доверенный внутренний вызывающий код отвечает за свои права сам.
+Метод не получает и не завершает чужую AsyncSession, не коммитит/не откатывает
+её dirty/new/flushed изменения. Сервис должен быть committed перед импортом:
+невидимая другой транзакции pending-запись намеренно не публикуется автоматически.
+Не следует подменять factory возвратом одной caller-owned активной session.
+
+Короткая service lock сериализует SDL/introspection и endpoint edits только
+на этапе записи; во время HTTP она не удерживается. Конкурентный импорт после
+commit видит тот же hash и возвращает прежний snapshot ID. При storage error
+owned transaction/session contexts откатывают весь импорт. См. официальную
 [семантику SQLAlchemy SAVEPOINT](https://docs.sqlalchemy.org/en/20/orm/session_transaction.html#using-savepoint).
-Успех завершается commit. API request имеет собственную session и при storage
-failure дополнительно делает rollback. Блокировка сохраняется до commit,
-поэтому повторный конкурентный импорт видит уже существующий hash и возвращает
-тот же snapshot ID. Исторические snapshots/runs/observations не удаляются.
 
 При совпадении с ранее импортированным SDL обновляются только source=introspection
 и introspection_json. schema_sdl/hash/id/created_at, типы/поля и их ID сохраняются.
@@ -103,4 +125,10 @@ redaction, права secret-manager и автоматические тесты 
 - SSRF/DNS rebinding на реальном httpcore transport с подменённой сетью, запрет
   небезопасного socket connect, TLS hostname verification, redirects, timeouts,
   stream limits/close, shared capacity и malformed/disabled introspection.
+- PostgreSQL pool_size=1/max_overflow=0: cookie/API-key introspection ждёт upstream,
+  а независимый GET /api/services выполняется в том же пуле до освобождения upstream;
+  checkout равен нулю во время HTTP и после возврата/отмены.
+- Отзыв grant/роли/session, expiry/блокировка, удаление сервиса и endpoint change
+  во время HTTP не оставляют schemas/types/fields. Чужие dirty/new/flushed изменения
+  остаются в caller transaction и не видны наблюдателю до явного caller commit.
 - Полный существующий CI с PostgreSQL 16 и реальным Nginx/Docker/Uvicorn smoke.

@@ -1,6 +1,8 @@
 """Database use cases; called by HTTP routes and future proxy integration."""
 
 import uuid
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
 from sqlalchemy import false, func, or_, select
@@ -40,6 +42,8 @@ class SchemaEndpointChanged(ConflictError):
 
 
 _UNCHECKED_ENDPOINT = object()
+SessionProvider = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+SchemaPermissionCheck = Callable[[AsyncSession], Awaitable[None]]
 
 
 class InvalidReferenceError(Exception):
@@ -182,6 +186,7 @@ async def ensure_visible_run(
 async def _save_parsed_schema(
     session: AsyncSession, service_id: uuid.UUID, parsed: ParsedSchema, *, source: str,
     introspection_json: dict | None = None, expected_endpoint=_UNCHECKED_ENDPOINT,
+    authorize: SchemaPermissionCheck | None = None, commit: bool = True,
 ) -> SchemaOut:
     # Serialize SDL and introspection writes on the same service. The lock is
     # acquired only after HTTP/validation, never while waiting for an upstream.
@@ -193,6 +198,8 @@ async def _save_parsed_schema(
             ).with_for_update().execution_options(populate_existing=True))
             if service is None:
                 raise NotFoundError("GraphQL service not found")
+            if authorize is not None:
+                await authorize(session)
             if expected_endpoint is not _UNCHECKED_ENDPOINT and service.endpoint_url != expected_endpoint:
                 raise SchemaEndpointChanged("Service endpoint changed during introspection; repeat the import")
             snapshot = await session.scalar(select(SchemaSnapshot).where(
@@ -222,9 +229,12 @@ async def _save_parsed_schema(
         if getattr(exc.orig, "sqlstate", None) == "23505":
             raise ConflictError("Concurrent schema import conflicted; retry the import") from None
         raise
-    await session.commit()
-    await session.refresh(snapshot)
-    return schema_out(snapshot)
+    # Materialize before commit: refresh afterwards would start another
+    # transaction and check out a connection again (also with expire_on_commit).
+    result = schema_out(snapshot)
+    if commit:
+        await session.commit()
+    return result
 
 
 async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> SchemaOut:
@@ -235,23 +245,39 @@ async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> 
     )
 
 
-async def import_introspection_schema(session: AsyncSession, service_id: uuid.UUID) -> SchemaOut:
-    """Resolve only the saved service endpoint, fetch, then atomically persist.
+async def import_introspection_schema(
+    sessions: SessionProvider, service_id: uuid.UUID, *, authorize: SchemaPermissionCheck | None = None,
+) -> SchemaOut:
+    """Own separate read/write sessions; retain no DB connection during HTTP.
 
-    The HTTP route checks RBAC/grant first. No URL/headers from the request are
-    accepted here. NULL endpoints may use only the explicitly enabled legacy
-    fallback; configured services always use their own endpoint.
+    The factory must create a fresh session per call, not return a caller-owned
+    active AsyncSession. We never commit/rollback any other session or pending
+    caller work. API authorization runs in both phases; trusted internal callers
+    may omit it. Uncommitted services require an explicit caller commit first.
     """
-    service = await session.get(GraphQLService, service_id, populate_existing=True)
-    if service is None:
-        raise NotFoundError("GraphQL service not found")
-    endpoint = service.endpoint_url
-    target = endpoint or (target_graphql_url() if legacy_enabled() else None)
-    if not target:
-        raise SchemaEndpointNotConfigured("Service endpoint is not configured; set endpointUrl or import SDL manually")
+    async with sessions() as session:
+        async with session.begin():
+            if authorize is not None:
+                await authorize(session)
+            service = await session.get(GraphQLService, service_id)
+            if service is None:
+                raise NotFoundError("GraphQL service not found")
+            endpoint = service.endpoint_url
+            target = endpoint or (target_graphql_url() if legacy_enabled() else None)
+            if not target:
+                raise SchemaEndpointNotConfigured("Service endpoint is not configured; set endpointUrl or import SDL manually")
+    # Both the read transaction and session have ended before DNS/HTTP/parsing.
     collected = await collect_schema(target)
-    return await _save_parsed_schema(session, service_id, collected.parsed, source="introspection",
-                                    introspection_json=collected.introspection_json, expected_endpoint=endpoint)
+    async with sessions() as session:
+        async with session.begin():
+            # Lock, reauthorize and compare the endpoint in the write transaction.
+            # Keep all schema/type/field flushes protected by the existing savepoint.
+            result = await _save_parsed_schema(
+                session, service_id, collected.parsed, source="introspection",
+                introspection_json=collected.introspection_json, expected_endpoint=endpoint,
+                authorize=authorize, commit=False,
+            )
+    return result
 
 
 async def list_schemas(session: AsyncSession, service_id: uuid.UUID) -> list[SchemaOut]:

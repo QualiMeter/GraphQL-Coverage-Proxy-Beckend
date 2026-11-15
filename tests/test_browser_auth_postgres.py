@@ -7,11 +7,12 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app import proxy
 from app.auth import bootstrap_admin, hash_password, token_hash
 from app.auth_models import BrowserSession, LoginThrottle, ServiceGrant, User
-from app.database import get_session
+from app.database import get_session, get_session_factory
 from app.main import app
 from app.upstream import PinnedTransport
 from app.services import create_run, create_service, import_sdl
@@ -47,12 +48,18 @@ async def auth_context(postgres_session, monkeypatch):
 
     async def dependency():
         yield postgres_session
+    # Separate ORM sessions join only the test's rollback-only connection. Real
+    # connection/pool ownership is covered by the one-connection regression test.
+    sessions = async_sessionmaker(bind=postgres_session.bind, expire_on_commit=False,
+                                 join_transaction_mode="create_savepoint")
+    app.dependency_overrides[get_session_factory] = lambda: sessions
     app.dependency_overrides[get_session] = dependency
     app.dependency_overrides[proxy.get_proxy_session] = dependency
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:
             yield client, users, private, public, private_schema, public_schema, private_run, public_run
     finally:
+        app.dependency_overrides.pop(get_session_factory, None)
         app.dependency_overrides.pop(get_session, None)
         app.dependency_overrides.pop(proxy.get_proxy_session, None)
 

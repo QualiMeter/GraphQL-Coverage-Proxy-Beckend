@@ -43,10 +43,10 @@ _cookie_scheme = APIKeyCookie(name=cookie_name(), scheme_name="CoverageSession",
 ROLE_RANK = {"viewer": 0, "analyst": 1, "operator": 2, "admin": 3}
 
 
-def require_role(role: str):
+def require_role(role: str, *, principal_dependency=current_principal):
     async def dependency(
         request: Request,
-        principal: Principal = Depends(current_principal),
+        principal: Principal = Depends(principal_dependency),
         _key: str | None = Security(_api_key_scheme),
         _cookie: str | None = Security(_cookie_scheme),
         _csrf: str | None = Header(default=None, alias="X-CSRF-Token",

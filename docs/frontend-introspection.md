@@ -81,8 +81,12 @@ Dedup остаётся serviceId + schemaHash по нормализованно�
 тот же id/createdAt, дубликатов нет. Совпадение с SDL-снимком обогащает его source
 и introspection metadata; SDL, hash, IDs типов/полей, runs и observations сохраняются.
 Ошибки откатывают весь набор schema/type/field; конкурентные SDL/introspection
-импорты сериализованы короткой service lock. HTTP проходит без этой блокировки;
-смена endpoint во время fetch даёт SERVICE_ENDPOINT_CHANGED без сохранения.
+импорты сериализованы короткой service lock. Read/write используют отдельные
+короткие сессии, PostgreSQL connection не удерживается во время HTTP (включая
+cookie authentication). После fetch заново проверяются session/роль/grant и
+endpoint: отзыв grant — 404, роль — 403, отозванная/истёкшая session либо блокировка
+пользователя — 401, смена endpoint — SERVICE_ENDPOINT_CHANGED без сохранения.
+Новых endpoints/DTO/миграций эта доработка не добавляет.
 
 Миграций и изменений SchemaOut/RunOut нет. SDL download, displayName, расширенные
 DTO графа, история, аналитика запросов и безопасный AST здесь не добавляются.
