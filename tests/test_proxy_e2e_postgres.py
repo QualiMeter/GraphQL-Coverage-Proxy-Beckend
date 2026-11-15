@@ -305,3 +305,60 @@ async def test_unverifiable_response_never_claims_data_or_coverage(
     assert row.graphql_has_errors is (True if case == "errors_only" else None)
     graph = (await http_client.get(f"/api/runs/{run.id}/coverage")).json()
     assert graph["summary"]["coveredFields"] == 0
+
+
+async def test_control_scenario_coverage_through_proxy(
+    postgres_session, http_client, upstream, monkeypatch,
+):
+    service = await create_service(postgres_session, "control-" + uuid.uuid4().hex, "Coverage control")
+    snapshot = await import_sdl(
+        postgres_session, service.id,
+        """
+        type Query { user(id: ID!): User users: [User!]! }
+        type Mutation { createUser(name: String!): User! }
+        type User { id: ID! name: String! email: String orders: [Order!]! }
+        type Order { id: ID! total: Float! }
+        """,
+    )
+    run = await create_run(postgres_session, snapshot.id, "Coverage control", {})
+    monkeypatch.setattr(app, "state", State({"coverage_analyzer": analyze_e2e_query}))
+
+    query = 'query { user(id: "u1") { id name orders { total } } }'
+    mutation = 'mutation { createUser(name: "Ada") { id name } }'
+    responses = {
+        query: {"data": {"user": {"id": "u1", "name": "Ada", "orders": [{"total": 12.0}]}}},
+        mutation: {"data": {"createUser": {"id": "u2", "name": "Ada"}}},
+    }
+    upstream(lambda request: raw_response(
+        200, json.dumps(responses[json.loads(request.content)["query"]]).encode(),
+    ))
+
+    for operation, covered, percent in (
+        (query, 5, 55.56),
+        (mutation, 6, 66.67),
+        (query, 6, 66.67),
+    ):
+        response = await http_client.post(
+            "/graphql", json={"query": operation},
+            headers={"X-Coverage-Run-Id": str(run.id)},
+        )
+        assert response.status_code == 200
+        assert response.json() == responses[operation]
+        coverage = await http_client.get(f"/api/runs/{run.id}/coverage")
+        assert coverage.status_code == 200
+        graph = coverage.json()
+        assert graph["summary"] == {
+            "totalFields": 9, "coveredFields": covered, "coveragePercent": percent,
+        }
+
+    assert {
+        (node["name"], field["name"]): field["hits"]
+        for node in graph["types"]
+        for field in node["fields"]
+    } == {
+        ("Query", "user"): 2, ("Query", "users"): 0,
+        ("Mutation", "createUser"): 1,
+        ("User", "id"): 3, ("User", "name"): 3,
+        ("User", "email"): 0, ("User", "orders"): 2,
+        ("Order", "id"): 0, ("Order", "total"): 2,
+    }
