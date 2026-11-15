@@ -157,11 +157,15 @@ curl http://localhost:8000/graphql \
   --data-binary '{"query":"query Health { health }","variables":{},"operationName":"Health"}'
 ```
 
-Прокси передаёт исходные байты тела, `Authorization`, `Cookie` и применимые заголовки.
+Прокси передаёт исходные байты тела, `Authorization` и применимые заголовки.
+В browser context любые Cookie и upstream Set-Cookie блокируются. Доверенный
+API-key E2E-клиент без Origin/Sec-Fetch-* сохраняет cookie passthrough; для разных
+сервисов нужны отдельные cookie jars. Внутренние cookies не передаются никогда.
 Hop-by-hop заголовки, указанные в `Connection` заголовки, `X-Coverage-Run-Id`
 и `X-Coverage-Api-Key`
 исключаются; `Host` и `Content-Length` формируются заново. Статус и тело upstream,
-включая 4xx/5xx, сжатие и отдельные `Set-Cookie`, сохраняются. Редиректы не выполняются.
+включая 4xx/5xx и сжатие, сохраняются. Upstream Set-Cookie допускается только для
+доверенного API-key E2E-клиента вне browser context. Редиректы не выполняются.
 Адрес upstream задаётся только окружением, HTTP-запрос не может его переопределить.
 
 При отсутствии или некорректном `TARGET_GRAPHQL_URL` только `/graphql` возвращает
@@ -289,3 +293,9 @@ python -m app.auth_cli cleanup
 COVERAGE_PUBLIC_ORIGIN; production — HTTPS и доверенные reverse proxy headers.
 Подробные настройки, эксплуатационные ограничения и DTO — [frontend-auth.md](docs/frontend-auth.md).
 Деплой и production-миграции этой задачей не выполняются.
+
+Перед merge при существующем автодеплое: [порядок безопасного выпуска PR #23](deploy/PR23-RELEASE.md).
+Production требует точный FORWARDED_ALLOW_IPS после Docker NAT и использует
+`python -m app.server`; wildcard/сети запрещены. Тест полного локального Docker-стенда:
+`python tests/docker_auth_smoke.py` (Linux Docker daemon, отдельный project, тестовый TLS).
+CI выполняет его после полного pytest; VPS при этом не используется.

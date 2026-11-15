@@ -25,7 +25,7 @@ router = APIRouter(tags=["GraphQL Proxy"],
 EXCLUDED_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
-    "host", "content-length", "x-coverage-run-id", "x-coverage-api-key", "x-csrf-token",
+    "cookie2", "set-cookie2", "host", "content-length", "x-coverage-run-id", "x-coverage-api-key", "x-csrf-token",
 }
 MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024
 
@@ -81,7 +81,10 @@ def decoded_response_copy(content: bytes, headers: httpx.Headers) -> bytes | Non
         return None
 
 
-def forwarded_headers(headers: httpx.Headers, *, strip_forwarding: bool = False) -> list[tuple[bytes, bytes]]:
+def forwarded_headers(
+    headers: httpx.Headers, *, strip_forwarding: bool = False, allow_cookies: bool = False,
+) -> list[tuple[bytes, bytes]]:
+    """Cookies are denied unless the caller selected trusted, non-browser E2E mode."""
     excluded = EXCLUDED_HEADERS | {
         token.strip().lower()
         for value in headers.get_list("connection")
@@ -94,7 +97,8 @@ def forwarded_headers(headers: httpx.Headers, *, strip_forwarding: bool = False)
     reserved_cookies = {"__Host-coverage_session", "coverage_dev_session"}
     for name, value in headers.raw:
         lower = name.decode("ascii").lower()
-        if lower in excluded or lower.startswith("x-coverage-"):
+        if (lower in excluded or lower.startswith("x-coverage-")
+                or (not allow_cookies and lower in {"cookie", "set-cookie"})):
             continue
         if lower == "cookie":
             value = b"; ".join(part.strip() for part in value.split(b";")
@@ -105,6 +109,17 @@ def forwarded_headers(headers: httpx.Headers, *, strip_forwarding: bool = False)
             continue
         output.append((name, value))
     return output
+
+
+def trusted_e2e_cookies(request: Request, principal: Principal) -> bool:
+    # API-key authentication is explicit, unlike ambient browser cookies. Even
+    # with a valid key, browser-shaped requests never get cookie passthrough.
+    # Keep this per-exchange policy when upstream routing becomes multi-service;
+    # never introduce a shared cookie jar or a global cookie-name allowlist.
+    return principal.api_key and not any(
+        name.lower() == "origin" or name.lower().startswith("sec-fetch-")
+        for name in request.headers
+    )
 
 
 @router.post("/graphql")
@@ -140,7 +155,9 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
         raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured correctly")
 
     body = await request.body()
-    headers = forwarded_headers(httpx.Headers(request.headers.raw), strip_forwarding=True)
+    allow_cookies = trusted_e2e_cookies(request, principal)
+    headers = forwarded_headers(httpx.Headers(request.headers.raw), strip_forwarding=True,
+                                allow_cookies=allow_cookies)
     started = time.perf_counter()
     try:
         # A separate cookie jar per request prevents cross-client session leakage.
@@ -151,7 +168,7 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
                 content = b"".join([chunk async for chunk in upstream.aiter_raw()])
                 duration_ms = max(0, int((time.perf_counter() - started) * 1000))
                 response = Response(content=content, status_code=upstream.status_code)
-                response.raw_headers.extend(forwarded_headers(upstream.headers))
+                response.raw_headers.extend(forwarded_headers(upstream.headers, allow_cookies=allow_cookies))
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="GraphQL upstream timed out") from None
     except httpx.RequestError:

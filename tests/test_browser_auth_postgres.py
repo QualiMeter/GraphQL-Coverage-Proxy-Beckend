@@ -229,7 +229,8 @@ async def test_proxy_browser_acl_csrf_and_cookie_isolation(auth_context, postgre
     client, users, private, public, private_schema, public_schema, private_run, public_run = auth_context
     headers, _ = await login(client)
     monkeypatch.setenv("TARGET_GRAPHQL_URL", "https://upstream.example.test/graphql")
-    monkeypatch.setattr(app.state, "coverage_analyzer", analyze_e2e_query)
+    from starlette.datastructures import State
+    monkeypatch.setattr(app, "state", State({"coverage_analyzer": analyze_e2e_query}))
     calls = []
 
     async def upstream(transport, request):
@@ -251,7 +252,9 @@ async def test_proxy_browser_acl_csrf_and_cookie_isolation(auth_context, postgre
     assert "x-csrf-token" not in calls[0].headers and "x-coverage-run-id" not in calls[0].headers
     assert token not in str(calls[0].headers)
     assert client.cookies.get("__Host-coverage_session") == token
-    assert client.cookies.get("upstream_cookie") == "okay"
+    assert client.cookies.get("upstream_cookie") is None
+    assert "set-cookie" not in response.headers
+    assert "cookie" not in calls[0].headers
     assert (await client.post("/graphql", content=body, headers=headers)).status_code == 400
     assert len(calls) == 1
 
@@ -283,3 +286,71 @@ async def test_explicit_dev_cookie_configuration(auth_context, monkeypatch):
         assert response.headers["set-cookie"].startswith("coverage_dev_session=")
         assert "Secure" not in response.headers["set-cookie"]
         assert (await dev.get("/api/auth/session")).json()["user"]["role"] == "viewer"
+
+
+async def test_browser_cookies_cannot_cross_service_boundary(auth_context, postgres_session, monkeypatch, caplog):
+    from app.analyzer_adapter import analyze_e2e_query
+    from test_graphql_proxy import raw_response
+
+    caplog.set_level("DEBUG")
+    client, users, private, public, _, _, private_run, public_run = auth_context
+    headers, _ = await login(client)
+    token = client.cookies.get("__Host-coverage_session")
+    await grant(postgres_session, users["operator"], private)
+    await grant(postgres_session, users["operator"], public)
+    from starlette.datastructures import State
+    monkeypatch.setattr(app, "state", State({"coverage_analyzer": analyze_e2e_query}))
+    calls = []
+
+    async def upstream(transport, request):
+        calls.append(request)
+        return raw_response(200, b'{"data":{}}', [
+            ("Set-Cookie", "portal_session=attacker; Path=/"),
+            ("Set-Cookie", "upstream_session=from-service-a; Path=/"),
+            ("Set-Cookie", "__Host-coverage_session=attacker; Secure; Path=/"),
+        ])
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", upstream)
+    # Stage 2 will resolve these targets by service; here exercise the cookie
+    # boundary across two real service/run contexts with different destinations.
+    for run, target in ((private_run, "https://service-a.example/graphql"),
+                        (public_run, "https://service-b.example/graphql")):
+        monkeypatch.setenv("TARGET_GRAPHQL_URL", target)
+        wire_headers = [*headers.items(), ("X-Coverage-Run-Id", str(run.id)),
+                        ("Cookie", f"__Host-coverage_session={token}; portal_session=portal-secret"),
+                        ("Cookie", "other_app_session=other-app-secret; upstream_session=service-a-secret")]
+        response = await client.post("/graphql", json={"query": "{ __typename }"}, headers=wire_headers)
+        assert response.status_code == 200
+        assert "set-cookie" not in response.headers
+    assert len(calls) == 2
+    assert calls[0].url.host == "service-a.example" and calls[1].url.host == "service-b.example"
+    assert all("cookie" not in call.headers for call in calls)
+    assert client.cookies.get("__Host-coverage_session") == token
+    assert client.cookies.get("portal_session") is None
+    assert client.cookies.get("upstream_session") is None
+    assert all(value not in caplog.text for value in (token, "portal-secret", "other-app-secret", "service-a-secret"))
+
+
+async def test_login_csrf_and_logout_through_production_uvicorn_proxy(auth_context, monkeypatch):
+    from app.server import server_config
+
+    _, users, *_ = auth_context
+    peer = "172.30.8.1"  # Immediate Docker NAT peer, not the Internet client's XFF.
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", peer)
+    config = server_config()
+    config.load()
+    headers = {"Origin": ORIGIN, "X-Forwarded-Proto": "https", "X-Forwarded-For": "198.51.100.7"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=config.loaded_app, client=(peer, 32410)),
+                                base_url="http://graphql.rebyte.fun") as proxied:
+        response = await proxied.post("/api/auth/login", json={"username": "operator", "password": PASSWORD}, headers=headers)
+        assert response.status_code == 200
+        assert "Secure" in response.headers["set-cookie"] and "HttpOnly" in response.headers["set-cookie"]
+        # Transport leg is HTTP; simulate the cookie the external HTTPS browser
+        # sends to Nginx, rather than relaxing the client's Secure cookie rules.
+        cookie = response.headers["set-cookie"].split(";", 1)[0]
+        write_headers = {**headers, "Cookie": cookie, "X-CSRF-Token": response.json()["csrfToken"]}
+        result = await proxied.post("/api/services", json={"key": "proxied-auth", "name": "Proxied"}, headers=write_headers)
+        assert result.status_code == 201
+        assert (await proxied.post("/api/auth/logout", headers={**headers, "Cookie": cookie})).status_code == 403
+        assert (await proxied.post("/api/auth/logout", headers=write_headers)).status_code == 204
+        current = await proxied.get("/api/auth/session", headers={"Cookie": cookie})
+        assert current.json()["user"] is None

@@ -82,9 +82,18 @@ Cookie: `__Host-coverage_session`, `Secure; HttpOnly; SameSite=Lax; Path=/`, б�
 Login требует точного `Origin`, включая схему и порт; нет fallback на Host,
 Referer или присланный `X-Forwarded-Host`. Unsafe-запросы с cookie дополнительно
 требуют `X-CSRF-Token`. SameSite не заменяет эту проверку. CLI key не требует CSRF.
-Cookie авторизации, CSRF и `X-Coverage-*` не пересылаются upstream.
-Upstream не может перезаписать зарезервированные cookie; остальные его
-Authorization/Cookie/Set-Cookie сохраняют прежнее поведение.
+При browser session proxy **не пересылает никакие Cookie upstream** и
+**не отдаёт никакие upstream Set-Cookie браузеру**, включая неизвестные имена.
+Это исключает утечку cookie других приложений общего origin и перенос cookies
+между будущими сервисами. Обычные явные Authorization и исходное тело сохраняются.
+CLI/E2E с валидным API key без Origin/Sec-Fetch-* сохраняет Cookie/Set-Cookie
+passthrough; зарезервированные Coverage cookies и внутренние заголовки удаляются
+в любом режиме. Запрос с Origin либо любым Sec-Fetch-* считается browser context
+для этой политики даже при API key; ни query-параметр, ни заголовок клиента не
+включают исключение. Browser cookie-auth к стороннему upstream таким способом
+не поддерживается: использовать явный upstream Authorization либо доверенный
+серверный E2E-клиент с отдельным cookie jar на сервис/run. Глобального cookie
+allowlist/jar нет. При добавлении multi-service эта граница должна сохраняться.
 Browser `/graphql` требует run ID и grant; прежний CLI passthrough в этом этапе сохранён.
 
 Все `/api/*` и `/graphql` ответы имеют `Cache-Control: no-store` и Vary по
@@ -160,6 +169,10 @@ Scrypt: N=2^17, r=8, p=1, случайная соль 16 байт. Одновр�
 Нужен проверенный reverse proxy с корректным HTTPS scheme в ASGI.
 Доверять proxy headers следует только известным адресам reverse proxy через
 настройку Uvicorn `FORWARDED_ALLOW_IPS`; публичный ввод доверенным не становится.
+Production Compose требует точные IP непосредственного peer после Docker NAT,
+запускает `app.server` и фиксирует dev mode=false. Wildcard и сети отвергаются.
+Nginx перезаписывает X-Forwarded-Proto через реальный `$scheme`, а XFF — `$remote_addr`.
+Подробности и порядок merge при autodeploy: [deploy/PR23-RELEASE.md](../deploy/PR23-RELEASE.md).
 
 ## Bootstrap, обслуживание и миграция
 

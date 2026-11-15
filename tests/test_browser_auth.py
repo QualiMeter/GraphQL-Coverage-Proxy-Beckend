@@ -83,7 +83,7 @@ def test_internal_session_and_csrf_are_never_forwarded_to_upstream():
         ("X-CSRF-Token", "csrf-secret"), ("X-Coverage-Control", "internal"),
         ("Authorization", "Bearer upstream-only"),
     ])
-    forwarded = httpx.Headers(forwarded_headers(headers, strip_forwarding=True))
+    forwarded = httpx.Headers(forwarded_headers(headers, strip_forwarding=True, allow_cookies=True))
     assert forwarded["cookie"] == "upstream_session=keep"
     assert forwarded["authorization"] == "Bearer upstream-only"
     assert "x-csrf-token" not in forwarded and "x-coverage-control" not in forwarded
@@ -92,7 +92,7 @@ def test_internal_session_and_csrf_are_never_forwarded_to_upstream():
         ("Set-Cookie", "coverage_dev_session=attacker; Path=/"),
         ("Set-Cookie", "upstream_cookie=keep; Path=/"),
     ])
-    assert httpx.Headers(forwarded_headers(cookies)).get_list("set-cookie") == ["upstream_cookie=keep; Path=/"]
+    assert httpx.Headers(forwarded_headers(cookies, allow_cookies=True)).get_list("set-cookie") == ["upstream_cookie=keep; Path=/"]
 
 
 def test_csrf_token_is_bound_to_browser_session():

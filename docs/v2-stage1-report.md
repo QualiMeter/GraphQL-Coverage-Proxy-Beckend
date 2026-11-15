@@ -1,5 +1,9 @@
 # Этап 1 v2.0 — доступ и контракты
 
+Правки по ревью PR #23 и актуальные проверки: [pr23-review-report.md](pr23-review-report.md).
+Ниже сохранён исходный отчёт первого этапа до этих правок.
+
+
 ## Реализовано
 
 Серверные PostgreSQL-сессии, Secure/HttpOnly/SameSite cookie, CSRF и точный Origin,
