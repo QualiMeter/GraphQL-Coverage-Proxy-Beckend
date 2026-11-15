@@ -92,12 +92,19 @@ def test_resource_limits_fail_closed(monkeypatch, limit, value):
     assert normalize_document('{ field(arg: "size-secret") }').availability == 'unavailable'
 
 
-def test_printer_failure_does_not_expose_exception_source(monkeypatch, caplog):
+@pytest.mark.parametrize('error_type', [RuntimeError, ValueError])
+def test_printer_failure_does_not_expose_exception_source(monkeypatch, caplog, error_type):
     def broken(_):
-        raise RuntimeError('raw-query-secret')
+        raise error_type('raw-query-secret')
     monkeypatch.setattr(safe_document, 'print_ast', broken)
     assert normalize_document('{ field(arg: "raw-query-secret") }').text is None
-    assert not caplog.text
+    assert 'raw-query-secret' not in caplog.text
+    record, = caplog.records
+    assert record.diagnostic == {
+        'event': 'coverage_internal_failure', 'stage': 'safe_document_mask',
+        'exception_type': error_type.__name__,
+    }
+    assert record.exc_info is None
 
 
 def test_non_executable_ast_node_fails_closed():

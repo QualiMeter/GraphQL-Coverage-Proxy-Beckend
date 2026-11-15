@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access import require_role
 from app.auth import Principal, current_principal, visibility_kwargs
 from app.config import target_graphql_url
+from app.diagnostics import internal_failure
 from app.database import SessionFactory, get_session_factory
 from app.e2e_capture import capture_e2e_exchange, load_run_snapshot
 from app.services import ConflictError, NotFoundError, ensure_visible_run
@@ -175,7 +176,8 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
             raise HTTPException(status_code=404, detail="Coverage run or schema snapshot not found") from None
         except ConflictError:
             raise HTTPException(status_code=409, detail="Coverage run is not running") from None
-        except Exception:
+        except Exception as exc:
+            internal_failure("coverage_preflight", exc, run_id=run_id)
             raise HTTPException(status_code=503, detail="Coverage storage is unavailable") from None
 
     if not target_url:
@@ -220,9 +222,11 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
                     response.raw_headers.extend(forwarded_headers(upstream.headers, allow_cookies=allow_cookies))
     except UpstreamTooLarge:
         raise HTTPException(status_code=502, detail="Upstream response exceeds the size limit; upstream may have executed the request. Do not retry automatically.") from None
-    except (httpx.TimeoutException, TimeoutError):
+    except (httpx.TimeoutException, TimeoutError) as exc:
+        internal_failure("upstream_request", exc, run_id=run_id)
         raise HTTPException(status_code=504, detail="GraphQL upstream timed out; upstream may have executed the request. Do not retry automatically.") from None
-    except httpx.RequestError:
+    except httpx.RequestError as exc:
+        internal_failure("upstream_request", exc, run_id=run_id)
         raise HTTPException(status_code=502, detail="GraphQL upstream request failed; upstream may have executed the request. Do not retry automatically.") from None
 
     if run_id is not None:
@@ -232,7 +236,8 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
                 decoded_response_body=decoded_response_copy(content, upstream.headers),
                 http_status=upstream.status_code, duration_ms=duration_ms, analyzer=analyzer,
             )
-        except Exception:
+        except Exception as exc:
+            internal_failure("observation_save", exc, run_id=run_id)
             # The upstream may already have performed a mutation. Do not return
             # success, retry upstream, or expose SQL/analyzer exception details.
             raise HTTPException(

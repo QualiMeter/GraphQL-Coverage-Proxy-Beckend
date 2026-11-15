@@ -22,6 +22,7 @@ from graphql.language import (
 )
 from graphql.type import GraphQLInterfaceType, GraphQLObjectType
 
+from app.diagnostics import internal_failure
 from app.contracts import AnalysisResult, FieldReference, GraphQLQueryInput
 
 
@@ -34,7 +35,8 @@ def analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysis
     """
     try:
         return _analyze_query(schema, request)
-    except Exception:
+    except Exception as exc:
+        internal_failure("analyzer", exc)
         # Analysis must never break transparent proxying. Do not expose request
         # text, variables, or exception details in the persisted error code.
         return AnalysisResult(status="internal_error", error_code="INTERNAL_ANALYZER_ERROR")

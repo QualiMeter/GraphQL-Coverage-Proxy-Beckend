@@ -10,12 +10,14 @@ from graphql import (
     GraphQLObjectType,
     GraphQLScalarType,
     GraphQLUnionType,
-    build_schema,
+    build_ast_schema,
     get_named_type,
+    parse,
     print_schema,
     validate_schema,
 )
 from graphql.type.schema import GraphQLSchema
+from graphql.validation.validate import validate_sdl
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,12 @@ class ParsedSchema:
 
 
 def parse_sdl(sdl: str) -> ParsedSchema:
-    schema: GraphQLSchema = build_schema(sdl)
+    document = parse(sdl)
+    # graphql-core's assert_valid_sdl raises TypeError for expected input errors
+    # (e.g. unknown types). Classify validation results, not arbitrary TypeErrors.
+    if validate_sdl(document):
+        raise ValueError("Invalid or unsupported GraphQL schema")
+    schema: GraphQLSchema = build_ast_schema(document, assume_valid_sdl=True)
     errors = validate_schema(schema)
     if errors:
         raise ValueError("; ".join(error.message for error in errors))
