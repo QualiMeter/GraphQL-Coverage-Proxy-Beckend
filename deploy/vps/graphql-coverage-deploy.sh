@@ -24,7 +24,7 @@ fail() {
 [[ "$#" -eq 1 && "$1" =~ ^[0-9a-f]{40}$ ]] || fail "Pass one 40-character commit SHA."
 readonly DEPLOY_SHA="$1"
 
-for command_name in git docker curl flock mktemp; do
+for command_name in git docker curl flock mktemp stat cmp; do
     command -v "$command_name" >/dev/null || fail "Missing command: $command_name"
 done
 
@@ -55,8 +55,11 @@ readonly CURRENT_SHA="$(git rev-parse HEAD)"
 install -d -m 0700 -o root -g root "$STATE_DIR"
 success_sha=""
 if [[ -f "$SUCCESS_FILE" && ! -L "$SUCCESS_FILE" ]]; then
-    success_sha="$(cat "$SUCCESS_FILE")" || success_sha=""
+    if [[ "$(stat -c '%s' "$SUCCESS_FILE")" == 41 ]]; then
+        success_sha="$(cat "$SUCCESS_FILE")" || success_sha=""
+    fi
     if [[ ! "$success_sha" =~ ^[0-9a-f]{40}$ ]] ||
+       ! cmp -s "$SUCCESS_FILE" <(printf '%s\n' "$success_sha") ||
        ! git cat-file -e "$success_sha^{commit}" 2>/dev/null; then
         log "Ignoring invalid deployment success record; deployment must be verified again."
         success_sha=""

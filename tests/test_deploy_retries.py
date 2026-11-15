@@ -187,3 +187,14 @@ def test_existing_commit_outside_origin_main_is_rejected(deploy):
     local_sha = command('git', 'rev-parse', 'HEAD', cwd=deploy.app)
     assert deploy.run(local_sha).returncode != 0
     assert not deploy.log()
+
+
+@pytest.mark.parametrize('suffix', [b'', b'\0', b'\n\n'])
+def test_record_must_match_exact_atomic_write_format(deploy, suffix):
+    command('git', 'fetch', 'origin', 'main', cwd=deploy.app)
+    command('git', 'merge', '--ff-only', deploy.new, cwd=deploy.app)
+    deploy.marker.parent.mkdir()
+    deploy.marker.write_bytes(deploy.new.encode() + suffix)
+    assert deploy.run().returncode == 0
+    assert 'build api' in deploy.log()
+    assert deploy.marker.read_bytes() == deploy.new.encode() + b'\n'
