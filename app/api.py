@@ -18,6 +18,7 @@ from app.access import require_operator, require_analyst, require_role
 from app.auth import Principal, current_principal, visibility_kwargs
 from app.upstream import UnsafeEndpoint, validate_endpoint
 from app.database import get_session, get_session_factory
+from app.diagnostics import internal_failure
 from app.run_analytics import get_run_stats, list_operations
 from app.schema_collector import SchemaCollectionError
 from app.schema_work import schema_work
@@ -152,7 +153,8 @@ async def post_schema(payload: SchemaImport, request: Request, sessions=Depends(
         raise api_errors(exc) from exc
     except (ValueError, GraphQLError, RecursionError):
         raise HTTPException(status_code=422, detail="Invalid or unsupported GraphQL schema") from None
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
+        internal_failure("sdl_import_storage", exc, service_id=payload.service_id)
         raise HTTPException(status_code=503, detail="Schema storage is unavailable") from None
 
 
@@ -197,7 +199,8 @@ async def post_introspection_schema(
     except SchemaCollectionError as exc:
         # Never serialize str(exc), SQL details, response bodies or URLs.
         return failure(exc.status_code, exc.code, exc.public_detail)
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
+        internal_failure("introspection_import_storage", exc, service_id=payload.service_id)
         # The owned session/transaction contexts already rolled back and closed.
         return failure(503, "SCHEMA_STORAGE_UNAVAILABLE", "Schema storage is temporarily unavailable")
 

@@ -8,12 +8,14 @@ No schema validation is implied: placeholders are deliberately not executable.
 from dataclasses import dataclass
 from typing import Literal
 
-from graphql import parse, print_ast
+from graphql import GraphQLError, parse, print_ast
 from graphql.language import Node, Visitor, visit
 from graphql.language.ast import (
     BooleanValueNode, EnumValueNode, FloatValueNode, IntValueNode,
     NullValueNode, StringValueNode,
 )
+
+from app.diagnostics import internal_failure
 
 DocumentAvailability = Literal["available", "redacted", "unavailable"]
 MAX_SAFE_DOCUMENT_BYTES = 65_536
@@ -46,6 +48,10 @@ _REPLACEMENTS = {
 }
 
 
+class _UnsupportedDocument(ValueError):
+    pass
+
+
 def _bounded_tree(root: Node):
     stack = [(root, 0)]
     count = 0
@@ -53,7 +59,7 @@ def _bounded_tree(root: Node):
         node, depth = stack.pop()
         count += 1
         if node.kind not in _ALLOWED_KINDS or count > MAX_AST_NODES or depth > MAX_AST_DEPTH:
-            raise ValueError("Unsupported or excessive AST")
+            raise _UnsupportedDocument("Unsupported or excessive AST")
         for key in node.keys:
             if key == "loc":
                 continue
@@ -84,8 +90,10 @@ def mask_value_ast(node: Node) -> SafeDocument:
         if not text or len(text.encode("utf-8")) > MAX_SAFE_DOCUMENT_BYTES:
             return SafeDocument()
         return SafeDocument(text, "redacted" if masker.redacted else "available")
-    except Exception:
-        # Do not log/chain parser or printer exceptions: they may contain source.
+    except (_UnsupportedDocument, UnicodeError, RecursionError):
+        return SafeDocument()
+    except Exception as exc:
+        internal_failure("safe_document_mask", exc)
         return SafeDocument()
 
 
@@ -99,5 +107,8 @@ def normalize_document(source: str) -> SafeDocument:
         } for d in document.definitions):
             return SafeDocument()
         return mask_value_ast(document)
-    except Exception:
+    except (GraphQLError, UnicodeError, RecursionError):
+        return SafeDocument()
+    except Exception as exc:
+        internal_failure("safe_document_parse", exc)
         return SafeDocument()

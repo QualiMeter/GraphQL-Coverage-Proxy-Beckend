@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.diagnostics import diagnostic_run, internal_failure
 from app.contracts import AnalysisResult, GraphQLQueryInput, RequestObservationInput
 from app.safe_document import SafeDocument, normalize_document
 from app.models import SchemaSnapshot, TestRun
@@ -115,19 +116,22 @@ async def capture_e2e_exchange(
             # A JSON string may contain an unpaired surrogate, which has no
             # UTF-8 query hash. Keep unknown identity instead of losing the observation.
             query_hash = None
-        try:
-            safe_document = await asyncio.to_thread(normalize_document, gql_input.query)
-        except Exception:
-            # Optional safe representation must never invalidate an executed mutation.
-            safe_document = SafeDocument()
-        try:
-            analysis = await analyzer(gql_input, snapshot.schema_sdl)
-        except Exception:
-            # An analyzer failure must not create fake coverage or persist
-            # exception messages that may contain GraphQL variables.
-            analysis = AnalysisResult(
-                status="internal_error", error_code="analyzer_failure"
-            )
+        with diagnostic_run(run_id):
+            try:
+                safe_document = await asyncio.to_thread(normalize_document, gql_input.query)
+            except Exception as exc:
+                internal_failure("safe_document", exc)
+                # Optional safe representation must never invalidate an executed mutation.
+                safe_document = SafeDocument()
+            try:
+                analysis = await analyzer(gql_input, snapshot.schema_sdl)
+            except Exception as exc:
+                internal_failure("analyzer", exc)
+                # An analyzer failure must not create fake coverage or persist
+                # exception messages that may contain GraphQL variables.
+                analysis = AnalysisResult(
+                    status="internal_error", error_code="analyzer_failure"
+                )
 
     response_has_data, graphql_has_errors = graphql_response_flags(decoded_response_body)
     return await record_observation(
