@@ -1,5 +1,8 @@
 # Отчёт: этап 2 v2.0, Multi-service и безопасный proxy
 
+> Исторический отчёт на момент PR #24. В этапе 3 временный запрет service
+> introspection снят: [актуальный контракт](frontend-introspection.md).
+
 База main: bf9cdb2cdbcbdc7d7fd2f4e41b10ea8f910c641a. Ветка codex/v2-multi-service.
 HEAD и ссылка CI фиксируются в PR и итоговом сообщении после публикации.
 

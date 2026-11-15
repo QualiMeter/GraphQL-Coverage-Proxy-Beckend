@@ -29,6 +29,14 @@ class UnsafeEndpoint(ValueError):
         super().__init__("Endpoint is not permitted by the outbound security policy")
 
 
+class EndpointResolutionError(UnsafeEndpoint):
+    """Resolution failed, preserving the base fail-closed outbound policy."""
+
+
+class EndpointResolutionTimeout(EndpointResolutionError):
+    pass
+
+
 class UpstreamTooLarge(Exception):
     pass
 
@@ -116,8 +124,10 @@ async def validate_endpoint(value: str) -> Destination:
             answers = await asyncio.wait_for(
                 _resolve(url.host, _origin(url)[2]), 3.0,
             )
-        except (OSError, TimeoutError):
-            raise UnsafeEndpoint() from None
+        except TimeoutError:
+            raise EndpointResolutionTimeout() from None
+        except OSError:
+            raise EndpointResolutionError() from None
         if not answers or len(answers) > 32:
             raise UnsafeEndpoint()
         addresses = tuple(dict.fromkeys(_address(answer[4][0], dev=dev) for answer in answers))

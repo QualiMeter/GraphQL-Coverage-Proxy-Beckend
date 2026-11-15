@@ -23,12 +23,12 @@ service_a=$(curl --fail-with-body -sS "$COVERAGE_BASE_URL/api/services" \
 service_b=$(curl --fail-with-body -sS "$COVERAGE_BASE_URL/api/services" \
   -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" -H 'Content-Type: application/json' \
   -d '{"key":"catalog","name":"Catalog","endpointUrl":"https://catalog.example.com/graphql"}' | jq -r .id)
-# orders.graphql и catalog.graphql — реальные SDL соответствующих upstream.
-snapshot_a=$(jq -n --arg id "$service_a" --rawfile sdl orders.graphql '{serviceId:$id,sdl:$sdl}' | \
-  curl --fail-with-body -sS "$COVERAGE_BASE_URL/api/schemas/import" \
+# Service → Introspection → SchemaSnapshot; каждый сервис использует свой endpoint.
+snapshot_a=$(jq -n --arg id "$service_a" '{serviceId:$id}' | \
+  curl --fail-with-body -sS "$COVERAGE_BASE_URL/api/schemas/import/introspection" \
   -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" -H 'Content-Type: application/json' --data-binary @- | jq -r .id)
-snapshot_b=$(jq -n --arg id "$service_b" --rawfile sdl catalog.graphql '{serviceId:$id,sdl:$sdl}' | \
-  curl --fail-with-body -sS "$COVERAGE_BASE_URL/api/schemas/import" \
+snapshot_b=$(jq -n --arg id "$service_b" '{serviceId:$id}' | \
+  curl --fail-with-body -sS "$COVERAGE_BASE_URL/api/schemas/import/introspection" \
   -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" -H 'Content-Type: application/json' --data-binary @- | jq -r .id)
 run_a=$(jq -n --arg id "$snapshot_a" '{snapshotId:$id,name:"Orders E2E"}' | \
   curl --fail-with-body -sS "$COVERAGE_BASE_URL/api/runs" -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
@@ -50,6 +50,10 @@ for run in "$run_a" "$run_b"; do
 done
 ```
 
+Если introspection отключена (409 INTROSPECTION_DISABLED) или требует upstream
+credentials, импортируйте реальные orders.graphql/catalog.graphql через
+POST /api/schemas/import. [Контракт и ошибки](frontend-introspection.md).
+
 В настоящем runner завершайте runs в finally/teardown после ожидания всех запросов.
 Один running run на snapshot; несколько snapshots/сервисов работают независимо.
 `__typename` — проверка транспорта; для реального покрытия нужны обычные поля SDL.
@@ -69,7 +73,7 @@ pip install -e '.[test]'
 # TEST_DATABASE_URL — отдельная временная PostgreSQL БД; пользователь может CREATE DATABASE.
 DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
 python -m pytest -q
-python -m pytest tests/test_multi_service_postgres.py tests/test_upstream_security.py -v
+python -m pytest tests/test_multi_service_postgres.py tests/test_upstream_security.py tests/test_service_introspection_postgres.py tests/test_introspection_security.py -v
 # Только при доступном локальном Docker daemon; создаёт изолированный smoke stack:
 python tests/docker_auth_smoke.py
 ```

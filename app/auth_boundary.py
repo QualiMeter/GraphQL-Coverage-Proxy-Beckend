@@ -21,7 +21,8 @@ class AuthBoundaryMiddleware:
         path = route_path(scope)
         is_auth = path.startswith("/api/auth/")
         is_service_write = path.startswith("/api/services") and scope["method"] in {"POST", "PATCH"}
-        if is_auth or is_service_write:
+        is_introspection = path == "/api/schemas/import/introspection" and scope["method"] == "POST"
+        if is_auth or is_service_write or is_introspection:
             body = bytearray()
             while True:
                 message = await receive()
@@ -29,7 +30,7 @@ class AuthBoundaryMiddleware:
                     return
                 body.extend(message.get("body", b""))
                 if len(body) > 16_384:
-                    response = JSONResponse({"detail": "Authentication payload too large" if is_auth else "Service payload too large"}, status_code=413,
+                    response = JSONResponse({"detail": "Authentication payload too large" if is_auth else "Schema import payload too large" if is_introspection else "Service payload too large"}, status_code=413,
                                             headers={"Cache-Control": "no-store"})
                     return await response(scope, receive, send)
                 if not message.get("more_body", False):

@@ -1,6 +1,6 @@
 # Outbound transport и SSRF: этап 2
 
-`app/upstream.py` — единая политика для endpoint CRUD, proxy и временной legacy
+`app/upstream.py` — единая политика для endpoint CRUD, proxy и service-aware
 introspection. На сохранении и перед каждым обменом проверяются URL и все
 DNS-ответы. Production разрешает только HTTPS:443, без userinfo, query (любой,
 включая пустой `?`), fragment, zone ID, неоднозначной authority и управляющих символов.
@@ -32,8 +32,11 @@ HTTP/local для разработки требуют **оба** COVERAGE_DEV_MO
 raw response 8 МиБ; decoded копия для анализа 1 МиБ. Обмен upstream ограничен
 30 с общим временем и 30 с на сетевую операцию, 16 одновременных обменов на
 worker (переполнение 503 без отправки). Ответ буферизуется, потоковая доставка
-и WebSocket не поддержаны. Legacy introspection принимает только identity encoding,
-до 8 МиБ и 15 с. Тела, query/variables/credentials/ответы не пишутся в БД или логи.
+и WebSocket не поддержаны. Service introspection принимает только identity encoding, до 8 МиБ и 15 с
+на DNS/HTTP fetch. Он использует общий лимит 16 jobs с proxy, удерживая слот
+до конца нормализации в worker thread. Дополнительные пределы: 200000 JSON nodes,
+глубина 64, до 5000 типов/50000 полей, имена до 255 символов.
+[Подробности и upstream auth](service-introspection.md). Тела, query/variables/credentials/ответы не пишутся в БД или логи.
 Не включать стороннее middleware/debug-логирование тел и заголовков.
 
 Service row FOR UPDATE сериализует создание run и изменение конфигурации.

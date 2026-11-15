@@ -149,7 +149,6 @@ async def test_endpoint_update_checks_all_snapshots_then_preserves_history(route
         detail = await anonymous.get(route)
         assert detail.status_code == 200 and detail.json()["endpointUrl"] is None
         assert (await anonymous.get("/api/services")).json()[0]["endpointUrl"] is None
-    assert (await client.post("/api/schemas/import/introspection", json={"serviceId": service["id"]})).status_code == 409
     assert (await client.patch(route, json={"endpointUrl": None})).status_code == 422
     assert (await client.patch(route, json={})).status_code == 422
 

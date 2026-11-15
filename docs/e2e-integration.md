@@ -1,7 +1,8 @@
 # Интеграция внешних E2E-тестов с GraphQL Coverage Proxy
 
-> Этап 2 v2.0: endpoint хранится отдельно для каждого сервиса; run ID определяет
-> upstream через snapshot. [Пример двух сервисов](multi-service-e2e.md).
+> Этапы 2–3 v2.0: endpoint хранится отдельно для каждого сервиса; run ID определяет
+> upstream через snapshot. Introspection импортирует схему выбранного Service.
+> [Пример двух сервисов](multi-service-e2e.md), [контракт introspection](frontend-introspection.md).
 > Browser использует cookie/CSRF, CLI — серверный API key. Browser cookies и
 > внутренние заголовки не уходят upstream. Безопасный AST — последующий этап P1.
 
@@ -28,7 +29,7 @@ E2E-набор; отдельная сущность тест-кейса и св�
 | Этап | Действие | Результат |
 | --- | --- | --- |
 | Подготовка сервиса | `GET /api/services`; при необходимости `POST /api/services` с `{"key":"demo-api","name":"Demo GraphQL API","endpointUrl":"https://api.example.com/graphql"}` | Использовать `id` сервиса; повторный key даёт 409 |
-| Подготовка схемы | `POST /api/schemas/import` с `{"serviceId":"<service UUID>","sdl":"<реальный SDL upstream>"}` | 201; `id` снимка использовать как `snapshotId`; повторный импорт той же схемы возвращает существующий снимок |
+| Подготовка схемы | Предпочтительно `POST /api/schemas/import/introspection` с serviceId; при недоступной introspection — `POST /api/schemas/import` с `{"serviceId":"<service UUID>","sdl":"<реальный SDL upstream>"}` | 201; `id` снимка использовать как `snapshotId`; повторный импорт той же схемы возвращает существующий снимок |
 | Выбор снимка | `GET /api/schemas?serviceId={serviceId}` | Выбрать версию, соответствующую реальному upstream |
 | Создание прогона | `POST /api/runs` с телом ниже | 201; сохранить `id` как runId; `status="running"`, `finishedAt=null` |
 | Выполнение | Передать runId всем участникам набора; отправлять GraphQL через прокси с `X-Coverage-Run-Id` | При подключённом анализаторе наблюдение сохраняется до выдачи ответа |

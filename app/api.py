@@ -3,25 +3,24 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 from graphql import GraphQLError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import (
     CoverageGraph, RequestOut, RunCreate, RunOut, SchemaImport, SchemaIntrospectionImport,
-    SchemaOut, ServiceCreate, ServiceOut, ServiceUpdate,
+    SchemaOut, SchemaImportErrorOut, ServiceCreate, ServiceOut, ServiceUpdate,
     OperationOut, OperationType, RunStats,
 )
 from app.access import require_operator, require_analyst
 from app.auth import Principal, current_principal, visibility_kwargs
-from app.config import target_graphql_url
-from app.upstream import UnsafeEndpoint, validate_endpoint, legacy_enabled
+from app.upstream import UnsafeEndpoint, validate_endpoint
 from app.database import get_session
 from app.run_analytics import get_run_stats, list_operations
-from app.schema_collector import (
-    InvalidIntrospectionResponseError, InvalidSchemaTargetURLError, SchemaConnectionError,
-)
+from app.schema_collector import SchemaCollectionError
 from app.services import (
-    ConflictError, NotFoundError, update_service, get_service, create_run, create_service,
+    ConflictError, NotFoundError, SchemaEndpointChanged, SchemaEndpointNotConfigured, update_service, get_service, create_run, create_service,
     ensure_visible_run, ensure_visible_service, ensure_visible_snapshot, finish_run,
     get_graph, get_run_graph, import_introspection_schema, import_sdl,
     list_requests, list_runs, list_schemas, list_services,
@@ -117,34 +116,42 @@ async def post_schema(payload: SchemaImport, session: AsyncSession = Session,
 
 @router.post(
     "/schemas/import/introspection", status_code=201, response_model=SchemaOut,
+    responses={status: {"model": SchemaImportErrorOut, "description": description} for status, description in {
+        404: "Service not found or inaccessible (SERVICE_NOT_FOUND)",
+        409: "Endpoint missing/changed, destination forbidden or introspection disabled; use SDL when appropriate",
+        502: "Upstream HTTP/DNS/JSON/schema/size failure; no upstream details are exposed",
+        503: "Outbound capacity or schema storage unavailable",
+        504: "DNS, connection or response timeout",
+    }.items()},
+    description="Import the selected Service endpointUrl using DNS/IP validation, pinned TLS transport, "
+                "no redirects/retries/proxies or incoming credentials. Operator requires a service grant; admin may import any service. "
+                "Deduplicates by serviceId + schemaHash; matching SDL snapshots retain identity and fields while source/introspection metadata are enriched. "
+                "Errors preserve string detail and add a stable code. INTROSPECTION_DISABLED (409) recommends manual SDL import.",
 )
 async def post_introspection_schema(
     payload: SchemaIntrospectionImport, session: AsyncSession = Session,
     principal: Principal = Depends(require_operator),
 ):
-    # Do not import a global upstream schema into a configured service. Service
-    # introspection is stage 3; stage 2 supports SDL and explicit legacy only.
+    def failure(status: int, code: str, detail: str):
+        return JSONResponse(status_code=status, content={"detail": detail, "code": code})
     try:
         if not principal.admin:
             await ensure_visible_service(session, payload.service_id, require_grant=True, **visibility_kwargs(principal))
-        service = await get_service(session, payload.service_id)
-        if service.endpoint_url or not legacy_enabled():
-            raise HTTPException(status_code=409, detail="Use SDL import for configured services until service introspection is available")
-        target_url = target_graphql_url()
-        if not target_url:
-            raise HTTPException(status_code=503, detail="TARGET_GRAPHQL_URL is not configured")
-        return await import_introspection_schema(session, payload.service_id, target_url)
-    except NotFoundError as exc:
-        raise api_errors(exc) from exc
-    except InvalidSchemaTargetURLError:
-        raise HTTPException(
-            status_code=503, detail="TARGET_GRAPHQL_URL is not configured correctly"
-        ) from None
-    except (SchemaConnectionError, InvalidIntrospectionResponseError):
-        # Do not expose upstream response bodies, GraphQL errors or URLs.
-        raise HTTPException(
-            status_code=502, detail="GraphQL schema introspection failed"
-        ) from None
+        return await import_introspection_schema(session, payload.service_id)
+    except NotFoundError:
+        return failure(404, "SERVICE_NOT_FOUND", "GraphQL service not found")
+    except SchemaEndpointNotConfigured:
+        return failure(409, "SERVICE_ENDPOINT_NOT_CONFIGURED", "Service endpoint is not configured; set endpointUrl or import SDL manually")
+    except SchemaEndpointChanged:
+        return failure(409, "SERVICE_ENDPOINT_CHANGED", "Service endpoint changed during introspection; repeat the import")
+    except ConflictError:
+        return failure(409, "SCHEMA_IMPORT_CONFLICT", "Concurrent schema import conflicted; retry the import")
+    except SchemaCollectionError as exc:
+        # Never serialize str(exc), SQL details, response bodies or URLs.
+        return failure(exc.status_code, exc.code, exc.public_detail)
+    except SQLAlchemyError:
+        await session.rollback()
+        return failure(503, "SCHEMA_STORAGE_UNAVAILABLE", "Schema storage is temporarily unavailable")
 
 
 @router.get("/schemas", response_model=list[SchemaOut])

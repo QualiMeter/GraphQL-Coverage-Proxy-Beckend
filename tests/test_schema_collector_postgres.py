@@ -62,10 +62,10 @@ async def test_introspection_persists_snapshot_and_does_not_save_failures(monkey
                     service = await services.create_service(
                         session,
                         "introspection-" + uuid.uuid4().hex,
-                        "Introspection integration test",
+                        "Introspection integration test", endpoint_url="https://graphql.example.test/graphql",
                     )
                     snapshot_out = await services.import_introspection_schema(
-                        session, service.id, "https://graphql.example.test/graphql"
+                        session, service.id
                     )
                     snapshot = await session.get(SchemaSnapshot, snapshot_out.id)
                     assert snapshot is not None
@@ -98,7 +98,7 @@ async def test_introspection_persists_snapshot_and_does_not_save_failures(monkey
                     assert ("User", "name") in fields
 
                     duplicate = await services.import_introspection_schema(
-                        session, service.id, "https://graphql.example.test/graphql"
+                        session, service.id
                     )
                     assert duplicate.id == snapshot_out.id
                     snapshot_count = await session.scalar(
@@ -112,12 +112,12 @@ async def test_introspection_persists_snapshot_and_does_not_save_failures(monkey
                     # session. Introspection must not roll back that data.
                     pending_service = GraphQLService(
                         key="pending-" + uuid.uuid4().hex,
-                        name="Uncommitted service",
+                        name="Uncommitted service", endpoint_url="https://graphql.example.test/graphql",
                     )
                     session.add(pending_service)
                     await session.flush()
                     pending_snapshot = await services.import_introspection_schema(
-                        session, pending_service.id, "https://graphql.example.test/graphql"
+                        session, pending_service.id
                     )
                     assert pending_snapshot.service_id == pending_service.id
                     assert await session.get(GraphQLService, pending_service.id) is not None
@@ -125,13 +125,12 @@ async def test_introspection_persists_snapshot_and_does_not_save_failures(monkey
                     failed_service = await services.create_service(
                         session,
                         "failed-introspection-" + uuid.uuid4().hex,
-                        "Failed introspection integration test",
+                        "Failed introspection integration test", endpoint_url="https://graphql.example.test/broken",
                     )
                     with pytest.raises(InvalidIntrospectionResponseError):
                         await services.import_introspection_schema(
                             session,
                             failed_service.id,
-                            "https://graphql.example.test/broken",
                         )
                     failed_snapshot_count = await session.scalar(
                         select(func.count()).select_from(SchemaSnapshot).where(

@@ -18,6 +18,8 @@ from app.models import (
     SchemaSnapshot, SchemaType, TestRun,
 )
 from app.schema_collector import collect_schema
+from app.config import target_graphql_url
+from app.upstream import legacy_enabled
 from app.schema_parser import ParsedSchema, parse_sdl
 
 
@@ -27,6 +29,17 @@ class NotFoundError(Exception):
 
 class ConflictError(Exception):
     pass
+
+
+class SchemaEndpointNotConfigured(ConflictError):
+    pass
+
+
+class SchemaEndpointChanged(ConflictError):
+    pass
+
+
+_UNCHECKED_ENDPOINT = object()
 
 
 class InvalidReferenceError(Exception):
@@ -167,58 +180,49 @@ async def ensure_visible_run(
 
 
 async def _save_parsed_schema(
-    session: AsyncSession,
-    service_id: uuid.UUID,
-    parsed: ParsedSchema,
-    *,
-    source: str,
-    introspection_json: dict | None = None,
+    session: AsyncSession, service_id: uuid.UUID, parsed: ParsedSchema, *, source: str,
+    introspection_json: dict | None = None, expected_endpoint=_UNCHECKED_ENDPOINT,
 ) -> SchemaOut:
-    existing = await session.scalar(
-        select(SchemaSnapshot).where(
-            SchemaSnapshot.service_id == service_id,
-            SchemaSnapshot.schema_hash == parsed.sha256,
-        )
-    )
-    if existing is not None:
-        if source == "introspection":
-            existing.schema_sdl = parsed.canonical_sdl
-            existing.source = source
-            existing.introspection_json = introspection_json
-            await session.commit()
-            await session.refresh(existing)
-        return schema_out(existing)
-
-    snapshot = SchemaSnapshot(
-        service_id=service_id, schema_hash=parsed.sha256,
-        schema_sdl=parsed.canonical_sdl, source=source,
-        introspection_json=introspection_json,
-    )
-    session.add(snapshot)
-    await session.flush()
-
-    type_ids: dict[str, uuid.UUID] = {}
-    for item in parsed.types:
-        type_id = uuid.uuid4()
-        type_ids[item.name] = type_id
-        session.add(SchemaType(id=type_id, snapshot_id=snapshot.id, name=item.name, kind=item.kind))
-    await session.flush()
-
-    for field in parsed.fields:
-        session.add(
-            SchemaField(
-                type_id=type_ids[field.type_name], name=field.name,
-                return_type=field.return_type,
-                target_type_id=type_ids.get(field.target_type_name) if field.target_type_name else None,
-                is_deprecated=field.is_deprecated,
-            )
-        )
-
+    # Serialize SDL and introspection writes on the same service. The lock is
+    # acquired only after HTTP/validation, never while waiting for an upstream.
+    # Savepoint covers every flush, preserving unrelated caller work on failure.
     try:
-        await session.commit()
+        async with session.begin_nested():
+            service = await session.scalar(select(GraphQLService).where(
+                GraphQLService.id == service_id,
+            ).with_for_update().execution_options(populate_existing=True))
+            if service is None:
+                raise NotFoundError("GraphQL service not found")
+            if expected_endpoint is not _UNCHECKED_ENDPOINT and service.endpoint_url != expected_endpoint:
+                raise SchemaEndpointChanged("Service endpoint changed during introspection; repeat the import")
+            snapshot = await session.scalar(select(SchemaSnapshot).where(
+                SchemaSnapshot.service_id == service_id, SchemaSnapshot.schema_hash == parsed.sha256,
+            ).execution_options(populate_existing=True))
+            if snapshot is not None:
+                if source == "introspection":
+                    # Keep historical identity/SDL/types/fields/runs unchanged;
+                    # enrich only schema provenance and introspection metadata.
+                    snapshot.source = source
+                    snapshot.introspection_json = introspection_json
+            else:
+                snapshot = SchemaSnapshot(service_id=service_id, schema_hash=parsed.sha256,
+                    schema_sdl=parsed.canonical_sdl, source=source, introspection_json=introspection_json)
+                session.add(snapshot)
+                await session.flush()
+                type_ids = {item.name: uuid.uuid4() for item in parsed.types}
+                session.add_all([SchemaType(id=type_ids[item.name], snapshot_id=snapshot.id,
+                    name=item.name, kind=item.kind) for item in parsed.types])
+                await session.flush()
+                session.add_all([SchemaField(type_id=type_ids[item.type_name], name=item.name,
+                    return_type=item.return_type,
+                    target_type_id=type_ids.get(item.target_type_name) if item.target_type_name else None,
+                    is_deprecated=item.is_deprecated) for item in parsed.fields])
+            await session.flush()
     except IntegrityError as exc:
-        await session.rollback()
-        raise ConflictError("Concurrent schema import conflicted; retry the request") from exc
+        if getattr(exc.orig, "sqlstate", None) == "23505":
+            raise ConflictError("Concurrent schema import conflicted; retry the import") from None
+        raise
+    await session.commit()
     await session.refresh(snapshot)
     return schema_out(snapshot)
 
@@ -231,30 +235,23 @@ async def import_sdl(session: AsyncSession, service_id: uuid.UUID, sdl: str) -> 
     )
 
 
-async def import_introspection_schema(
-    session: AsyncSession, service_id: uuid.UUID, target_url: str
-) -> SchemaOut:
-    """Fetch an upstream schema and persist its normalized SDL and raw JSON.
+async def import_introspection_schema(session: AsyncSession, service_id: uuid.UUID) -> SchemaOut:
+    """Resolve only the saved service endpoint, fetch, then atomically persist.
 
-    ``target_url`` must come from application configuration, never from an API
-    request body. The HTTP route and configuration are owned by backend #1.
+    The HTTP route checks RBAC/grant first. No URL/headers from the request are
+    accepted here. NULL endpoints may use only the explicitly enabled legacy
+    fallback; configured services always use their own endpoint.
     """
-    # Fetch first, before opening a database transaction. Never roll back the
-    # caller's session: it may contain unrelated uncommitted changes.
-    collected = await collect_schema(target_url)
-    if await session.get(GraphQLService, service_id) is None:
+    service = await session.get(GraphQLService, service_id, populate_existing=True)
+    if service is None:
         raise NotFoundError("GraphQL service not found")
-    # The uniqueness rule is per service and normalized schema hash, so an
-    # introspection of a schema already imported from SDL enriches that same
-    # snapshot instead of creating a duplicate. The schema and provenance are
-    # committed atomically.
-    return await _save_parsed_schema(
-        session,
-        service_id,
-        collected.parsed,
-        source="introspection",
-        introspection_json=collected.introspection_json,
-    )
+    endpoint = service.endpoint_url
+    target = endpoint or (target_graphql_url() if legacy_enabled() else None)
+    if not target:
+        raise SchemaEndpointNotConfigured("Service endpoint is not configured; set endpointUrl or import SDL manually")
+    collected = await collect_schema(target)
+    return await _save_parsed_schema(session, service_id, collected.parsed, source="introspection",
+                                    introspection_json=collected.introspection_json, expected_endpoint=endpoint)
 
 
 async def list_schemas(session: AsyncSession, service_id: uuid.UUID) -> list[SchemaOut]:
