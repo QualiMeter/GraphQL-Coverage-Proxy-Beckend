@@ -57,7 +57,7 @@ class RunFilters(DateRange):
 
 class RequestFilters(DateRange):
     operation_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", description="Exact lowercase SHA-256 identity returned by /operations.")
-    operation_name: str | None = Field(default=None, max_length=255, description="Exact case-sensitive name; omission includes unnamed operations.")
+    operation_name: str | None = Field(default=None, description="Exact full case-sensitive name; omission includes unnamed operations.")
     operation_type: OperationType | None = None
     type_name: str | None = Field(default=None, min_length=1, max_length=255)
     field_name: str | None = Field(default=None, min_length=1, max_length=255)

@@ -137,7 +137,7 @@ class ObservedRequest(Base):
     run_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("test_runs.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    operation_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operation_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     operation_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     operation_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     safe_graphql_document: Mapped[str | None] = mapped_column(Text, nullable=True)

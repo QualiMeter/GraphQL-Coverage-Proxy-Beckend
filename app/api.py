@@ -234,7 +234,8 @@ async def post_run(payload: RunCreate, session: AsyncSession = Session,
     try:
         if not principal.admin:
             await ensure_visible_snapshot(session, payload.snapshot_id, require_grant=True, **visibility_kwargs(principal))
-        return await create_run(session, payload.snapshot_id, payload.name, payload.metadata)
+        return await create_run(session, payload.snapshot_id, payload.name, payload.metadata,
+                                include_metadata=principal.admin)
     except (NotFoundError, ConflictError) as exc:
         raise api_errors(exc) from exc
 
@@ -266,7 +267,7 @@ async def post_finish_run(run_id: uuid.UUID, session: AsyncSession = Session,
     try:
         if not principal.admin:
             await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
-        return await finish_run(session, run_id)
+        return await finish_run(session, run_id, include_metadata=principal.admin)
     except (NotFoundError, ConflictError) as exc:
         raise api_errors(exc) from exc
 

@@ -142,6 +142,12 @@ decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
 
 Если запись после upstream не удалась, ответ — 502 с предупреждением, что upstream
 уже мог выполнить запрос. Автоматически повторять mutation нельзя.
+Проверка cookie session и preflight run/snapshot/service освобождают соединения
+PostgreSQL до DNS, чтения тела и upstream HTTP. После ответа наблюдение сохраняется
+в новой транзакции с прежней блокировкой run относительно `finish`.
+Полные имена GraphQL-операций сохраняются как `TEXT` и точно фильтруются в журнале,
+включая имена длиннее 255 символов. Требуется миграция
+`20261119_operation_name_text`; [проверки и ограничение downgrade](docs/stage6-audit-report.md).
 Подробный контракт, порядок подключения и оставшиеся зависимости:
 [docs/e2e-integration.md](docs/e2e-integration.md).
 
