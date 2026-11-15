@@ -20,11 +20,13 @@ from app.upstream import UnsafeEndpoint, validate_endpoint
 from app.database import get_session, get_session_factory
 from app.run_analytics import get_run_stats, list_operations
 from app.schema_collector import SchemaCollectionError
+from app.schema_work import schema_work
+from app.models import TestRun
 from app.services import (
     ConflictError, NotFoundError, SchemaEndpointChanged, SchemaEndpointNotConfigured, update_service, get_service, create_run, create_service,
     ensure_visible_run, ensure_visible_service, ensure_visible_snapshot, finish_run,
-    get_schema_sdl, update_snapshot_label, get_graph, get_run_graph, import_introspection_schema, import_sdl,
-    list_schemas, list_services,
+    get_schema_sdl, update_snapshot_label, import_introspection_schema,
+    list_schemas, list_services, import_sdl_schema, load_graph, build_graph,
 )
 
 from app.journal import RunFilters, RequestFilters, list_run_page, list_request_page, get_request_detail
@@ -136,12 +138,16 @@ async def patch_service(
 @router.post(
     "/schemas/import", status_code=201, response_model=SchemaOut,
 )
-async def post_schema(payload: SchemaImport, session: AsyncSession = Session,
-                      principal: Principal = Depends(require_operator)):
+async def post_schema(payload: SchemaImport, request: Request, sessions=Depends(get_session_factory),
+                      principal: Principal = Depends(require_introspection_operator)):
+    async def authorize(session: AsyncSession):
+        current = await current_principal(request, session)
+        await require_operator(request, principal=current)
+        if not current.admin:
+            await ensure_visible_service(session, payload.service_id, require_grant=True, **visibility_kwargs(current))
+
     try:
-        if not principal.admin:
-            await ensure_visible_service(session, payload.service_id, require_grant=True, **visibility_kwargs(principal))
-        return await import_sdl(session, payload.service_id, payload.sdl)
+        return await import_sdl_schema(sessions, payload.service_id, payload.sdl, authorize=authorize)
     except (NotFoundError, ConflictError) as exc:
         raise api_errors(exc) from exc
     except (ValueError, GraphQLError, RecursionError):
@@ -232,11 +238,14 @@ async def patch_schema(schema_id: uuid.UUID, payload: SchemaUpdate, session: Asy
 
 @router.get("/schemas/{schema_id}/graph", response_model=CoverageGraph)
 async def get_schema_graph(
-    schema_id: uuid.UUID, session: AsyncSession = Session, principal: Principal = Depends(current_principal)
+    schema_id: uuid.UUID, sessions=Depends(get_session_factory),
+    principal: Principal = Depends(introspection_principal),
 ):
     try:
-        await ensure_visible_snapshot(session, schema_id, **visibility_kwargs(principal))
-        return await get_graph(session, schema_id)
+        async with sessions() as session:
+            await ensure_visible_snapshot(session, schema_id, **visibility_kwargs(principal))
+            data = await load_graph(session, schema_id)
+        return await schema_work(build_graph, data)
     except NotFoundError as exc:
         raise api_errors(exc) from exc
 
@@ -289,11 +298,17 @@ async def post_finish_run(run_id: uuid.UUID, session: AsyncSession = Session,
 
 @router.get("/runs/{run_id}/coverage", response_model=CoverageGraph)
 async def get_coverage(
-    run_id: uuid.UUID, session: AsyncSession = Session, principal: Principal = Depends(current_principal)
+    run_id: uuid.UUID, sessions=Depends(get_session_factory),
+    principal: Principal = Depends(introspection_principal),
 ):
     try:
-        await ensure_visible_run(session, run_id, **visibility_kwargs(principal))
-        return await get_run_graph(session, run_id)
+        async with sessions() as session:
+            await ensure_visible_run(session, run_id, **visibility_kwargs(principal))
+            run = await session.get(TestRun, run_id)
+            if run is None:
+                raise NotFoundError("Test run not found")
+            data = await load_graph(session, run.snapshot_id, run_id)
+        return await schema_work(build_graph, data)
     except NotFoundError as exc:
         raise api_errors(exc) from exc
 

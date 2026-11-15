@@ -27,6 +27,11 @@
 
 ## 1. Установить серверный скрипт
 
+Для исправления повторных deployment на уже работающем production следуйте
+[Production Pre-Deployment Checklist](RELIABILITY-RELEASE.md): оператор устанавливает
+проверенную root-owned копию **до merge**, под существующим `flock`, без переключения
+`ENABLE_PRODUCTION_DEPLOY`. Команды ниже относятся к первоначальной установке.
+
 Только **после мержа и ревью** PR. На VPS под root:
 
 ```bash

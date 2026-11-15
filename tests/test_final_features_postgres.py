@@ -12,13 +12,14 @@ import uuid
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app import e2e_capture
 from app.analyzer_adapter import analyze_e2e_query
 from app.auth_models import ServiceGrant
-from app.database import get_session
+from app.database import get_session, get_session_factory
 from app.e2e_capture import capture_e2e_exchange
 from app.main import app
 from app.models import GraphQLService, ObservedRequest, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
@@ -63,6 +64,9 @@ async def feature_context(postgres_session, monkeypatch):
     async def dependency():
         yield postgres_session
     app.dependency_overrides[get_session] = dependency
+    sessions = async_sessionmaker(bind=postgres_session.bind, expire_on_commit=False,
+                                 join_transaction_mode="create_savepoint")
+    app.dependency_overrides[get_session_factory] = lambda: sessions
     from app.proxy import get_proxy_session
     app.dependency_overrides[get_proxy_session] = dependency
     try:
@@ -70,6 +74,7 @@ async def feature_context(postgres_session, monkeypatch):
                                      headers={'X-Coverage-Api-Key': TEST_KEY}) as client:
             yield client, service, snapshot, run
     finally:
+        app.dependency_overrides.pop(get_session_factory, None)
         app.dependency_overrides.pop(get_session, None)
         app.dependency_overrides.pop(get_proxy_session, None)
 
