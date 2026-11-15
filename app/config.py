@@ -9,7 +9,7 @@ def database_url() -> str:
 
 
 def cors_origins() -> list[str]:
-    value = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
+    value = os.environ.get("CORS_ORIGINS", "")
     return [origin.strip() for origin in value.split(",") if origin.strip()]
 
 

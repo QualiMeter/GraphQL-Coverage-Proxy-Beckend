@@ -23,6 +23,18 @@ Frontend, demo GraphQL API и конфигурация Nginx в Compose не в�
 передаёт разрешённые пути в API на loopback. Сам Docker по-прежнему не
 публикует API напрямую в Интернет.
 
+## Авторизация за Nginx и Docker
+
+Перед merge PR #23 обязательно следовать [порядку слияния и выпуска](PR23-RELEASE.md):
+существующий push main может запустить autodeploy. Сам PR ничего не разворачивает.
+
+Nginx завершает TLS на host; API за loopback port mapping видит HTTP и Docker peer.
+Production entry point `python -m app.server` явно включает proxy_headers и доверяет
+только точным адресам из FORWARDED_ALLOW_IPS. Неверный/пустой список отвергается
+до миграций; wildcard, подсети и DNS запрещены. Пример перезаписи заголовков:
+[nginx/coverage-proxy.conf](nginx/coverage-proxy.conf), включать в каждый API location
+существующего TLS server после ревью и `nginx -t`. Production Nginx автоматически не меняется.
+
 ## 1. Размещение файлов
 
 Работайте под выделенной учётной записью развёртывания с правом запуска Docker.
@@ -76,6 +88,8 @@ ${EDITOR:-nano} deploy/.env
 | `API_ROOT_PATH` | Публичный префикс, который Nginx убирает при проксировании; если не задан — `/coverage`, для отдельного домена `graphql.rebyte.fun` установить `API_ROOT_PATH=` (пустое значение) |
 | `TARGET_GRAPHQL_URL` | Необязательный URL целевого GraphQL API; можно оставить пустым |
 | `COVERAGE_API_KEY` | Секрет длиной от 32 символов для приватных REST-операций и `/graphql`; `openssl rand -hex 32`; хранить только в `deploy/.env` |
+| `FORWARDED_ALLOW_IPS` | Обязательные точные IP непосредственного Nginx peer после Docker NAT; определить на staging, не угадывать gateway и не доверять подсетям |
+| `COVERAGE_PUBLIC_ORIGIN` | Точный browser Origin; по умолчанию https://graphql.rebyte.fun, без пути и завершающего slash |
 | `CORS_ORIGINS` | Разрешённые origins через запятую, например `https://coverage.example.com`; пустое значение отключает cross-origin доступ |
 
 Текущий backend использует `TARGET_GRAPHQL_URL` для `/graphql` и импорта схемы
@@ -92,7 +106,8 @@ API-контейнера указывает на сам контейнер.
 У Swagger будет `/openapi.json`, а не прежний `/coverage/openapi.json`.
 Старый путь `https://rebyte.fun/coverage/` не использовать для новых клиентов.
 Публичное чтение ограничено `isPublic=true`, административные изменения,
-журнал запросов и GraphQL-прокси защищены `COVERAGE_API_KEY`.
+журнал запросов и GraphQL-прокси защищены cookie/CSRF/ролью/grant либо доверенным CLI key.
+Cookie/Set-Cookie браузерного proxy полностью изолированы от upstream.
 
 `.env` исключён из Git, `.env.example` остаётся в репозитории. Не публикуйте
 `.env`, полный вывод `docker compose config` или `docker inspect`: они содержат
@@ -128,9 +143,10 @@ docker compose --env-file deploy/.env -f deploy/compose.production.yaml ps -a
 docker compose --env-file deploy/.env -f deploy/compose.production.yaml logs --tail=100 db api
 ```
 
-БД проходит `pg_isready` healthcheck, затем API выполняет `alembic upgrade head`.
+БД проходит `pg_isready` healthcheck, затем API проверяет `python -m app.server --check-config`
+и только после успешной проверки выполняет `alembic upgrade head`.
 Только при успешных миграциях запускается
-`uvicorn app.main:app --host 0.0.0.0 --port 8000 --root-path "$API_ROOT_PATH"`.
+`python -m app.server`, с root_path из API_ROOT_PATH и точным FORWARDED_ALLOW_IPS.
 `exec` передаёт процессу
 uvicorn сигналы остановки. Оба контейнера используют `restart: unless-stopped`.
 Команда `up -d` сама по себе не подтверждает готовность API: проверьте состояние,

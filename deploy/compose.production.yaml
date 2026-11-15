@@ -28,6 +28,10 @@ services:
       TARGET_GRAPHQL_URL: ${TARGET_GRAPHQL_URL:-}
       COVERAGE_API_KEY: ${COVERAGE_API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      COVERAGE_PUBLIC_ORIGIN: ${COVERAGE_PUBLIC_ORIGIN:-https://graphql.rebyte.fun}
+      # Production cookies must never be weakened by a dev .env setting.
+      COVERAGE_DEV_MODE: "false"
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:?Set exact immediate Nginx peer IPs as seen inside the API container}
       # The '-' form uses the default only when unset; an explicit empty
       # API_ROOT_PATH is required when the API moves to its own subdomain.
       API_ROOT_PATH: ${API_ROOT_PATH-/coverage}
@@ -38,7 +42,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --root-path \"$$API_ROOT_PATH\""]
+    command: ["sh", "-c", "python -m app.server --check-config && alembic upgrade head && exec python -m app.server"]
     restart: unless-stopped
 
 volumes:

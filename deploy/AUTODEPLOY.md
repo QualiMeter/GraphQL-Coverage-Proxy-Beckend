@@ -1,5 +1,11 @@
 # Автодеплой GraphQL Coverage на VPS
 
+**Перед слиянием PR #23:** [обязательный порядок безопасного merge/release](PR23-RELEASE.md).
+При ENABLE_PRODUCTION_DEPLOY=true успешный push main способен немедленно изменить VPS.
+Сначала ответственный оператор выключает variable и отменяет/дожидается активных
+и ожидающих deploy jobs. В рамках PR настройки GitHub/VPS не менялись.
+
+
 После настройки GitHub Actions развёртывает только проверенные коммиты из `main`.
 До подготовки SSH и Secrets процесс **отключён**: переменная
 `ENABLE_PRODUCTION_DEPLOY` отсутствует или не равна `true`.

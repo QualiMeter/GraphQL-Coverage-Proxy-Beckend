@@ -1,5 +1,14 @@
 # Интеграция внешних E2E-тестов с GraphQL Coverage Proxy
 
+> Этап 1 v2.0: доверенные CLI/E2E по-прежнему используют X-Coverage-Api-Key.
+> Браузер теперь использует [cookie-сессию, роль и grant](frontend-auth.md),
+> Origin и X-CSRF-Token. В browser proxy run ID обязателен. Все browser Cookie
+> и upstream Set-Cookie блокируются; CSRF и X-Coverage-* не уходят upstream.
+> API-key E2E без Origin/Sec-Fetch-* сохраняет явные upstream cookies; отдельный jar на сервис. По-прежнему глобальный TARGET_GRAPHQL_URL: routing
+> нескольких сервисов и SSRF появятся в следующем этапе. Безопасный AST-документ
+> включён в P1 отдельным последующим этапом; исходные query/variables не хранятся.
+
+
 Документ для разработчиков бэкенда, тестов и фронтенда карты покрытия.
 Источники контракта: [app/contracts.py](../app/contracts.py),
 [REST API для фронтенда](frontend-api.md), [app/api_models.py](../app/api_models.py)
@@ -131,7 +140,7 @@ GraphQL URL тестируемого приложения должен быть 
 При запросе с заголовком браузер должен иметь право передать `X-Coverage-Run-Id`
 и используемые приложением заголовки, включая `Authorization`.
 Текущий FastAPI разрешает все методы и заголовки для origin из `CORS_ORIGINS`
-(по умолчанию `http://localhost:5173`), но `allow_credentials` не включён.
+(по умолчанию список пуст), но `allow_credentials` не включён.
 Cross-origin cookies требуют отдельного решения; для демо с cookie-auth удобен
 один origin с заранее настроенной маршрутизацией. Этот документ её не меняет.
 
@@ -143,13 +152,16 @@ Cross-origin cookies требуют отдельного решения; для 
 остаются частью реального приложения.
 
 Прокси реализует пересылку исходных байтов тела и применимых заголовков, включая
-`Authorization` и `Cookie`. Исключаются `X-Coverage-Run-Id`, hop-by-hop заголовки
+`Authorization`. Cookie/Set-Cookie сохраняются только для доверенных API-key
+CLI/E2E без Origin и Sec-Fetch-*; browser context блокирует их целиком. Для каждого
+сервиса/run использовать отдельный cookie jar и не общий browser storage. Исключаются `X-Coverage-Run-Id`, hop-by-hop заголовки
 и заголовки, перечисленные в `Connection`; `Host` и `Content-Length` формируются
 заново. Это также означает, что некорректный клиентский `Connection: Authorization`
 приведёт к исключению `Authorization` как hop-by-hop заголовка.
 
 При успешной записи наблюдения HTTP-статус и тело upstream, включая GraphQL
-`errors`, HTTP 4xx/5xx и отдельные `Set-Cookie`, доходят до приложения без изменений.
+`errors` и HTTP 4xx/5xx доходят до приложения без изменений. Upstream Set-Cookie
+передаются только доверенному API-key CLI/E2E вне browser context.
 Входящие `X-Forwarded-*`, `Forwarded` и `X-Real-IP` удаляются, клиент не задаёт
 доверенные forwarding-метаданные. Анализатор читает копию данных в памяти.
 Исходные байты ответа получаются через `aiter_raw()` и сохраняют сжатие.
@@ -345,7 +357,10 @@ export { expect };
 
 `route.continue()` отправляет запрос в сеть. Здесь не меняются URL, метод, тело,
 исходный `Authorization` и ответ; не используются `fulfill`, HAR или локальные
-GraphQL-ответы. Cookie остаётся под управлением браузера. Точный matcher требует,
+GraphQL-ответы. Этот browser-пример требует явной авторизации Coverage через сессию/CSRF
+либо доверенного серверного адаптера: административный ключ в browser внедрять нельзя.
+Browser Cookie к upstream и upstream Set-Cookie блокируются; cookie-auth upstream
+проверяется серверным E2E-клиентом с отдельным jar на сервис. Точный matcher требует,
 чтобы приложение использовало тот же URL, включая query string, что и
 `COVERAGE_GRAPHQL_URL`. Redirect на этом endpoint для демо не нужен.
 Service Workers блокируются, чтобы они не обходили перехват context.

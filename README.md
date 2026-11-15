@@ -13,24 +13,28 @@
 успешном CI на `main`; Nginx отдаёт её с того же HTTPS origin, что и API.
 Пока UI использует mock/localStorage, интеграция с реальным API — задача фронтендера.
 
-Регистрация для просмотра опубликованных сервисов не нужна. Все изменяющие
-операции и GraphQL-прокси защищены серверным API-ключом.
+Регистрация для просмотра опубликованных сервисов не нужна. В этой ветке добавлены
+серверные сессии, роли и ACL (этап 1 v2.0, до production не выложено).
+[Контракт авторизации и bootstrap](docs/frontend-auth.md) ·
+[план следующих P0/P1](docs/v2-implementation-plan.md).
+CLI/E2E сохраняет серверный API key, браузер использует cookie+CSRF.
 
 ## Что уже работает
 
-- Семь таблиц PostgreSQL с внешними ключами, CHECK, UNIQUE и индексами;
+- Семь core-таблиц PostgreSQL и четыре таблицы авторизации с внешними ключами, CHECK, UNIQUE и индексами;
   отдельная миграция для приватности сервисов.
 - Импорт схемы из **SDL** и через GraphQL introspection с разбором полей и SHA-256 снимка.
 - Создание сервиса и прогона E2E; запрет второго активного прогона в рамках снимка схемы.
 - Сохранение наблюдения через Python-функцию `app.services.record_observation()`.
 - Подсчёт уникального покрытия полей и числа запросов, затронувших каждое поле.
 - REST API и автоматическая документация Swagger/OpenAPI.
+- Пользователи viewer/analyst/operator/admin, серверные сессии, CSRF, grants, bootstrap CLI.
 - `POST /graphql` — HTTP-прокси на адрес из `TARGET_GRAPHQL_URL`.
 - GraphQL AST Analyzer для query/mutation, подключённый к E2E-записи через async-адаптер.
 - Публичные/приватные сервисы (`isPublic`) и API-ключ для изменяющих операций.
 
 **Пока не реализовано:** поддержка GraphQL fragments/subscriptions,
-привязка к конкретному E2E-тест-кейсу, пользовательские аккаунты.
+привязка к конкретному E2E-тест-кейсу.
 Публичный фронтенд никогда не должен содержать административный API-ключ.
 
 ## Локальный запуск через Docker
@@ -61,19 +65,24 @@ curl http://localhost:8000/health
 
 ## Приватные и публичные сервисы
 
-Для защищённых операций задайте `COVERAGE_API_KEY` в окружении (минимум
-32 символа, рекомендуется `openssl rand -hex 32`). Без ключа такие маршруты
-возвращают `503` (fail-closed), а приватные данные не открываются.
+Для доверенного CLI/CI задайте `COVERAGE_API_KEY` в окружении (минимум
+32 символа, рекомендуется `openssl rand -hex 32`). Браузер использует login/session
+и CSRF; API key для него не нужен. Первого администратора создаёт
+`python -m app.auth_cli bootstrap-admin initialadmin` после миграции.
+Пароль запрашивается через getpass. Открытой регистрации нет.
 
 - Новые и ранее созданные сервисы **приватны по умолчанию** (`isPublic=false`).
   Администратор может опубликовать сервис через
   `PATCH /api/services/{service_id}` с телом `{"isPublic":true}`.
 - `GET /api/services`, списки схем/прогонов и графы покрытия без ключа доступны
-  только для опубликованных сервисов. Приватные UUID дают анонимным клиентам `404`.
+  только для опубликованных сервисов. Авторизованные видят также сервисы с grant.
+  Приватные UUID без разрешения дают `404`.
 - Произвольное поле `metadata` тестового прогона скрыто при публичном чтении
-  (`{}`); журнал запросов `GET /api/runs/{run_id}/requests` всегда защищён.
+  (`{}`); журнал `GET /api/runs/{run_id}/requests` доступен analyst/operator с grant
+  либо admin/CLI. Произвольное metadata выдаётся только admin/CLI.
 - Создание сервисов, импорт схем, запуск и завершение прогонов, управление
-  видимостью и `POST /graphql` требуют заголовок `X-Coverage-Api-Key`.
+  видимостью и `POST /graphql` требуют operator/admin session+CSRF и grant
+  либо доверенный `X-Coverage-Api-Key`.
   Административный ключ никогда не пересылается на upstream; собственный
   клиентский `Authorization` по-прежнему передаётся прозрачно.
 - Секретный ключ допустим только на сервере или в защищённой CI-среде,
@@ -148,11 +157,15 @@ curl http://localhost:8000/graphql \
   --data-binary '{"query":"query Health { health }","variables":{},"operationName":"Health"}'
 ```
 
-Прокси передаёт исходные байты тела, `Authorization`, `Cookie` и применимые заголовки.
+Прокси передаёт исходные байты тела, `Authorization` и применимые заголовки.
+В browser context любые Cookie и upstream Set-Cookie блокируются. Доверенный
+API-key E2E-клиент без Origin/Sec-Fetch-* сохраняет cookie passthrough; для разных
+сервисов нужны отдельные cookie jars. Внутренние cookies не передаются никогда.
 Hop-by-hop заголовки, указанные в `Connection` заголовки, `X-Coverage-Run-Id`
 и `X-Coverage-Api-Key`
 исключаются; `Host` и `Content-Length` формируются заново. Статус и тело upstream,
-включая 4xx/5xx, сжатие и отдельные `Set-Cookie`, сохраняются. Редиректы не выполняются.
+включая 4xx/5xx и сжатие, сохраняются. Upstream Set-Cookie допускается только для
+доверенного API-key E2E-клиента вне browser context. Редиректы не выполняются.
 Адрес upstream задаётся только окружением, HTTP-запрос не может его переопределить.
 
 При отсутствии или некорректном `TARGET_GRAPHQL_URL` только `/graphql` возвращает
@@ -226,9 +239,10 @@ REST API предоставляет агрегаты существующих н
 Точные DTO, примеры и семантика — в [контракте фронтенда](docs/frontend-api.md#81-операции-прогона)
 и FastAPI OpenAPI. Завершённые прогоны используют собственные исторические данные.
 Детальный журнал, `POST /graphql` и изменяющие методы
-по-прежнему требуют серверной авторизации. Пользовательские аккаунты и
-регистрация не входят в этот этап. Не передавайте `COVERAGE_API_KEY` в браузер.
-Фильтрация журнала, подробности обращения и сравнение прогонов (P1) пока не реализованы.
+требуют авторизации с соответствующими ролью и grant. Пользователей создаёт admin,
+самостоятельной регистрации нет. Не передавайте `COVERAGE_API_KEY` в браузер.
+Фильтры/подробности, multi-service и безопасный AST-документ — оставшиеся P0/P1;
+сравнение прогонов — P2, позже.
 
 ## Тесты
 
@@ -261,3 +275,27 @@ pytest -q -m integration
   а не успешность выполнения каждого вложенного resolver.
 
 Изменения в `contracts.py` согласовываются между разработчиками.
+
+## Проверка этапа авторизации
+
+```bash
+export DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage_test
+export TEST_DATABASE_URL="$DATABASE_URL"
+alembic upgrade head
+pytest -q tests/test_browser_auth.py tests/test_browser_auth_postgres.py tests/test_auth_migrations_postgres.py
+python -m app.auth_cli cleanup
+```
+
+Только отдельная тестовая БД. Migration-тест создаёт/удаляет временную БД на том же
+тестовом сервере и требует CREATEDB. PostgreSQL проверяет upgrade/downgrade с
+историческими записями, роли, grants, cookie/CSRF, отзыв сессий, throttling и proxy.
+Для HTTP разработки явно задать COVERAGE_DEV_MODE=true и точный
+COVERAGE_PUBLIC_ORIGIN; production — HTTPS и доверенные reverse proxy headers.
+Подробные настройки, эксплуатационные ограничения и DTO — [frontend-auth.md](docs/frontend-auth.md).
+Деплой и production-миграции этой задачей не выполняются.
+
+Перед merge при существующем автодеплое: [порядок безопасного выпуска PR #23](deploy/PR23-RELEASE.md).
+Production требует точный FORWARDED_ALLOW_IPS после Docker NAT и использует
+`python -m app.server`; wildcard/сети запрещены. Тест полного локального Docker-стенда:
+`python tests/docker_auth_smoke.py` (Linux Docker daemon, отдельный project, тестовый TLS).
+CI выполняет его после полного pytest; VPS при этом не используется.
