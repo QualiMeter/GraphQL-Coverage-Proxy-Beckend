@@ -64,6 +64,8 @@ async def test_empty_run_and_unknown_duration(postgres_session, analytics_run, n
     session = postgres_session
     stats = await get_run_stats(session, run.id)
     assert stats.model_dump() == {
+        "analysis_status_counts": {"success": 0, "parse_error": 0, "validation_error": 0,
+                                   "unsupported": 0, "internal_error": 0}, "p95_duration_ms": None,
         "total_requests": 0, "counted_requests": 0, "unique_operations": 0,
         "query_requests": 0, "mutation_requests": 0, "subscription_requests": 0,
         "http_error_count": 0, "graphql_error_count": 0, "avg_duration_ms": None,

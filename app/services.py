@@ -1,5 +1,6 @@
 """Database use cases; called by HTTP routes and future proxy integration."""
 
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import (
     CoverageGraph, CoverageSummary, GraphField, GraphRelation, GraphType,
-    RequestOut, RunOut, SchemaOut, ServiceOut,
+    RequestOut, RunOut, SchemaOut, SchemaSdlOut, ServiceOut,
 )
 from app.contracts import RequestObservationInput
 from app.auth_models import ServiceGrant
@@ -19,6 +20,7 @@ from app.models import (
     GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
 )
+from app.schema_metadata import schema_metadata, root_types, argument_metadata, abstract_metadata
 from app.schema_collector import collect_schema
 from app.config import target_graphql_url
 from app.upstream import legacy_enabled
@@ -61,7 +63,7 @@ def service_out(row: GraphQLService, *, include_endpoint: bool = True) -> Servic
 def schema_out(row: SchemaSnapshot) -> SchemaOut:
     return SchemaOut(
         id=row.id, service_id=row.service_id, schema_hash=row.schema_hash,
-        source=row.source, created_at=row.created_at,
+        source=row.source, created_at=row.created_at, display_name=row.display_name,
     )
 
 
@@ -280,6 +282,25 @@ async def import_introspection_schema(
     return result
 
 
+async def get_schema_sdl(session: AsyncSession, snapshot_id: uuid.UUID) -> SchemaSdlOut:
+    snapshot = await session.get(SchemaSnapshot, snapshot_id)
+    if snapshot is None:
+        raise NotFoundError("Schema snapshot not found")
+    return SchemaSdlOut(schema_id=snapshot.id, schema_hash=snapshot.schema_hash, sdl=snapshot.schema_sdl)
+
+
+async def update_snapshot_label(session: AsyncSession, snapshot_id: uuid.UUID, display_name: str | None) -> SchemaOut:
+    snapshot = await session.scalar(select(SchemaSnapshot).where(
+        SchemaSnapshot.id == snapshot_id,
+    ).with_for_update())
+    if snapshot is None:
+        raise NotFoundError("Schema snapshot not found")
+    snapshot.display_name = display_name
+    result = schema_out(snapshot)
+    await session.commit()
+    return result
+
+
 async def list_schemas(session: AsyncSession, service_id: uuid.UUID) -> list[SchemaOut]:
     rows = (await session.scalars(
         select(SchemaSnapshot)
@@ -379,6 +400,8 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
         operation_name=analysis.operation_name,
         operation_type=analysis.operation_type,
         query_hash=observation.query_hash,
+        safe_graphql_document=observation.safe_document.text,
+        document_availability=observation.safe_document.availability,
         http_method=observation.http_method,
         http_status=observation.http_status,
         analysis_status=analysis.status,
@@ -398,8 +421,15 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
 async def get_graph(
     session: AsyncSession, snapshot_id: uuid.UUID, run_id: uuid.UUID | None = None
 ) -> CoverageGraph:
-    if await session.get(SchemaSnapshot, snapshot_id) is None:
+    snapshot = await session.get(SchemaSnapshot, snapshot_id)
+    if snapshot is None:
         raise NotFoundError("Schema snapshot not found")
+    metadata = schema_metadata(snapshot.schema_sdl)
+    roots = root_types(metadata)
+    root_operations: dict[str, list[str]] = {}
+    for kind, name in roots.model_dump().items():
+        if name is not None:
+            root_operations.setdefault(name, []).append(kind)
 
     hit_counts: dict[uuid.UUID, int] = {}
     if run_id is not None:
@@ -438,6 +468,8 @@ async def get_graph(
     for type_row in type_rows:
         if type_row.kind not in {"OBJECT", "INTERFACE", "UNION"}:
             continue
+        gql_type = metadata.get_type(type_row.name)
+        interfaces, possible_types = abstract_metadata(metadata, gql_type)
         raw_fields = fields_by_type.get(type_row.id, [])
         graph_fields: list[GraphField] = []
         type_covered = 0
@@ -446,13 +478,17 @@ async def get_graph(
             covered = hits > 0
             type_covered += int(covered)
             target = type_by_id.get(field.target_type_id) if field.target_type_id else None
+            gql_field = gql_type.fields[field.name]
             graph_fields.append(GraphField(
+                description=gql_field.description, deprecation_reason=gql_field.deprecation_reason,
+                args=argument_metadata(gql_field),
                 name=field.name, return_type=field.return_type,
                 target_type=target.name if target else None,
                 deprecated=field.is_deprecated, covered=covered, hits=hits,
             ))
             if target is not None:
                 relations.append(GraphRelation(
+                    id=uuid.uuid5(snapshot_id, json.dumps([type_row.name, field.name, target.name], separators=(",", ":"))),
                     from_type=type_row.name, field=field.name,
                     to_type=target.name, covered=covered,
                 ))
@@ -460,6 +496,8 @@ async def get_graph(
             total_fields += len(raw_fields)
             covered_fields += type_covered
         graph_types.append(GraphType(
+            description=gql_type.description, root_operations=root_operations.get(type_row.name, []),
+            interfaces=interfaces, possible_types=possible_types,
             name=type_row.name, kind=type_row.kind,
             total_fields=len(raw_fields), covered_fields=type_covered,
             coverage_percent=round(type_covered * 100 / len(raw_fields), 2) if raw_fields else None,
@@ -467,7 +505,7 @@ async def get_graph(
         ))
 
     return CoverageGraph(
-        schema_id=snapshot_id, run_id=run_id,
+        schema_id=snapshot_id, run_id=run_id, root_types=roots,
         summary=CoverageSummary(
             total_fields=total_fields, covered_fields=covered_fields,
             coverage_percent=round(covered_fields * 100 / total_fields, 2) if total_fields else 0.0,

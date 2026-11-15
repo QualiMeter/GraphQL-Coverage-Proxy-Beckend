@@ -77,6 +77,7 @@ def test_openapi_has_exact_analytics_dtos_and_public_access():
         "totalRequests", "countedRequests", "uniqueOperations", "queryRequests", "mutationRequests",
         "subscriptionRequests", "httpErrorCount", "graphqlErrorCount", "avgDurationMs",
         "totalFields", "coveredFields", "coveragePercent", "requestTimeline",
+        "analysisStatusCounts", "p95DurationMs",
     }
     assert set(models["OperationFieldOut"]["properties"]) == {"typeName", "fieldName", "hits"}
     assert models["OperationOut"]["properties"]["operationName"]["anyOf"] == [{"type": "string"}, {"type": "null"}]

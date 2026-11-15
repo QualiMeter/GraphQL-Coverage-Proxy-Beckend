@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import (
     CoverageGraph, RequestDetailOut, RequestOut, RunCreate, RunOut, SchemaImport, SchemaIntrospectionImport,
-    SchemaOut, SchemaImportErrorOut, ServiceCreate, ServiceOut, ServiceUpdate,
+    SchemaOut, SchemaUpdate, SchemaSdlOut, SchemaImportErrorOut, ServiceCreate, ServiceOut, ServiceUpdate,
     OperationOut, OperationType, RunStats,
 )
 from app.access import require_operator, require_analyst, require_role
@@ -23,7 +23,7 @@ from app.schema_collector import SchemaCollectionError
 from app.services import (
     ConflictError, NotFoundError, SchemaEndpointChanged, SchemaEndpointNotConfigured, update_service, get_service, create_run, create_service,
     ensure_visible_run, ensure_visible_service, ensure_visible_snapshot, finish_run,
-    get_graph, get_run_graph, import_introspection_schema, import_sdl,
+    get_schema_sdl, update_snapshot_label, get_graph, get_run_graph, import_introspection_schema, import_sdl,
     list_schemas, list_services,
 )
 
@@ -127,8 +127,12 @@ async def post_schema(payload: SchemaImport, session: AsyncSession = Session,
         if not principal.admin:
             await ensure_visible_service(session, payload.service_id, require_grant=True, **visibility_kwargs(principal))
         return await import_sdl(session, payload.service_id, payload.sdl)
-    except (NotFoundError, ConflictError, ValueError, GraphQLError) as exc:
+    except (NotFoundError, ConflictError) as exc:
         raise api_errors(exc) from exc
+    except (ValueError, GraphQLError, RecursionError):
+        raise HTTPException(status_code=422, detail="Invalid or unsupported GraphQL schema") from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Schema storage is unavailable") from None
 
 
 @router.post(
@@ -187,6 +191,28 @@ async def get_schemas(
     except NotFoundError as exc:
         raise api_errors(exc) from exc
     return await list_schemas(session, service_id)
+
+
+@router.get("/schemas/{schema_id}/sdl", response_model=SchemaSdlOut,
+            description="Saved real snapshot SDL and its original ID/hash; public or service grant/admin access. Never a request document.")
+async def get_sdl(schema_id: uuid.UUID, session: AsyncSession = Session,
+                  principal: Principal = Depends(current_principal)):
+    try:
+        await ensure_visible_snapshot(session, schema_id, **visibility_kwargs(principal))
+        return await get_schema_sdl(session, schema_id)
+    except NotFoundError as exc:
+        raise api_errors(exc) from exc
+
+
+@router.patch("/schemas/{schema_id}", response_model=SchemaOut,
+              description="Edit only displayName; null clears it. Operator with service grant or admin/CLI; cookie writes require CSRF. Content, hash, IDs and coverage stay immutable.")
+async def patch_schema(schema_id: uuid.UUID, payload: SchemaUpdate, session: AsyncSession = Session,
+                       principal: Principal = Depends(require_operator)):
+    try:
+        await ensure_visible_snapshot(session, schema_id, require_grant=True, **visibility_kwargs(principal))
+        return await update_snapshot_label(session, schema_id, payload.display_name)
+    except NotFoundError as exc:
+        raise api_errors(exc) from exc
 
 
 @router.get("/schemas/{schema_id}/graph", response_model=CoverageGraph)

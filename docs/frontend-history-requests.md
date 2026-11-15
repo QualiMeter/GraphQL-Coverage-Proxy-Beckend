@@ -1,5 +1,8 @@
 # Этап 4: история сервиса и журнал обращений
 
+Это контракт этапа 4; additive изменения этапа 5 описаны в
+[актуальном frontend delta](frontend-final-features.md).
+
 База: main `979c5f9b9078834a92261b53fdc28e9fdff87916` (PR #25).
 Same-origin `https://graphql.rebyte.fun`: используйте относительные `/api/...`,
 существующую серверную cookie session; административный API key в браузер не передаётся.

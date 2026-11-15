@@ -47,6 +47,8 @@ def parse_sdl(sdl: str) -> ParsedSchema:
     if errors:
         raise ValueError("; ".join(error.message for error in errors))
 
+    if len(schema.type_map) > 5000:
+        raise ValueError("Schema exceeds the supported type limit")
     normalized = print_schema(schema)
     sha = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     type_classes = {
@@ -66,12 +68,16 @@ def parse_sdl(sdl: str) -> ParsedSchema:
         kind = type_classes.get(type(gql_type))
         if kind is None:
             continue
+        if len(name) > 255:
+            raise ValueError("Schema type name exceeds the supported limit")
         types.append(ParsedType(name=name, kind=kind))
 
         if isinstance(gql_type, (GraphQLObjectType, GraphQLInterfaceType)):
             for field_name, gql_field in sorted(gql_type.fields.items()):
                 if field_name.startswith("__"):
                     continue
+                if len(field_name) > 255 or len(fields) >= 50_000:
+                    raise ValueError("Schema fields exceed the supported limits")
                 named_type = get_named_type(gql_field.type)
                 target = (
                     named_type.name

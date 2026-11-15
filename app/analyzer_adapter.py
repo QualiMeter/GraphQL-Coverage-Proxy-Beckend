@@ -1,18 +1,9 @@
 """Bind the synchronous GraphQL AST analyzer to the async E2E capture contract."""
 
 import asyncio
-from functools import lru_cache
-
-from graphql import GraphQLSchema, build_schema
-
 from app.contracts import AnalysisResult, GraphQLQueryInput
 from app.query_analyzer import analyze_query
-
-
-@lru_cache(maxsize=32)
-def _schema_from_sdl(schema_sdl: str) -> GraphQLSchema:
-    # A snapshot's canonical SDL is immutable; reuse a bounded number of schemas.
-    return build_schema(schema_sdl)
+from app.schema_cache import schema_from_sdl as _schema_from_sdl
 
 
 def _analyze(request: GraphQLQueryInput, schema_sdl: str) -> AnalysisResult:

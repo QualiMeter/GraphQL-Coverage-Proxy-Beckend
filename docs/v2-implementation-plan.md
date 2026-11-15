@@ -116,3 +116,48 @@ Merge/deploy выполняет заказчик после ревью; producti
 завершёнными: их нужно явно включить в согласованный остаток P0/P1 на этапах 5–6.
 Этап 6 — итоговый аудит P0/P1, сквозные проверки и окончательная документация.
 P2 не начат. Переход к этапу 5 только после ревью и принятия этапа 4.
+
+
+## Этап 5: финальные функциональные P0/P1 — реализовано для ревью
+
+База main `1fd1ffdce3946217e15e8bd1f2d01010d911212f` (принятый PR #26),
+ветка `codex/v2-final-features`. [Frontend delta](frontend-final-features.md),
+[release/migration notes](../deploy/STAGE5-RELEASE.md).
+
+| Приоритет | Функциональный критерий | Фактическая реализация |
+|---|---|---|
+| P0 | Несколько сервисов, CRUD, независимые upstream/runs | Принятые этапы 1–2; service row lock, endpoint 409 при активном run, pinned DNS/SSRF, legacy только явно |
+| P0 | Сессии, роли, CSRF, grants и приватность | Принятый этап 1; journal требует отдельный grant независимо от публикации, CLI key не в браузере |
+| P0 | SDL/introspection выбранного сервиса, dedup/атомарность | Принятый этап 3; раздельные short transactions и ACL/endpoint recheck; SDL body/ошибки/имена дополнительно ограничены |
+| P0 | История всех snapshots сервиса, фильтры и total | Принятый этап 4; без скрытого limit старого snapshotId-вызова |
+| P0 | Журнал, AND-фильтры, operationKey/detail/точный snapshot | Принятый этап 4; без duplicate/N+1, SQL pagination, protected detail |
+| P0 | analysisStatusCounts | Один SQL aggregate для всех пяти реальных категорий и total; нули для пустого run |
+| P1 | P95 и среднее/пустые значения | percentile_cont(0.95), NULL исключены, run isolation; avg/timeline сохранены |
+| P1 | Реальный безопасный документ | AST всего wire document, все scalar literals/defaults masked; bounded text, fail-closed unavailable; только detail по ACL |
+| P1 | SDL и schema metadata | SDL выбранного snapshot; GraphField description/deprecationReason/args и safe defaults, GraphType descriptions/root roles/interfaces/possibleTypes, stable relation UUID |
+| P1 | Snapshot label | Optional displayName + PATCH только operator/grant/admin/CLI; hash/ID/coverage неизменны |
+
+Additive migration `20261118_final_features`: nullable display_name и safe document,
+non-null document_availability с default unavailable и CHECK состояния/размера.
+Нет UPDATE исторического SDL/hash/IDs и восстановления прежних query.
+Открытый PR #22 остаётся отдельным тестом, не дублируется в ветке.
+
+Функциональные пункты P0/P1 выше реализованы, но **полная приёмка backend ещё не
+объявляется завершённой**: нужны независимое ревью этого PR и этап 6. Открытые
+проверки: сопоставить итоговый checklist ТЗ со всеми принятыми PR; проверить
+frontend end-to-end, production observability без body/credential capture,
+sizing safe documents и план всех pending migrations на копии production БД.
+После принятия этапа 5 функциональных P0/P1 endpoints в плане не остаётся.
+Не заменять unsupported fragments/subscriptions успешным coverage: улучшение
+Coverage Engine не входит в запрос и формула не меняется.
+
+Этап 6 — независимый аудит, сквозные проверки/документация и отдельно согласованный
+release plan; VPS пока не меняется. P2 не начат. После PR этапа 5 остановиться
+для ревью, не выполнять merge/deploy и не включать ENABLE_PRODUCTION_DEPLOY.
+
+Локальная верификация финального этапа 5: PostgreSQL 18.6 / graphql-core 3.3.2 —
+501 passed, без skipped, один прежний Starlette/httpx warning. Дополнительно
+safe AST/schema/PostgreSQL набор на graphql-core 3.2.14 — 51 passed; контрольный
+сценарий открытого PR #22 — 1 passed, 17 deselected. Alembic check, pip check,
+Compose config, deploy-script syntax, compileall и diff check пройдены.
+Результат GitHub CI указывается в описании PR после его завершения.

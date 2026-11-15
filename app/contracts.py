@@ -4,6 +4,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+from app.safe_document import SafeDocument
+
 
 AnalysisStatus = Literal[
     "success", "parse_error", "validation_error", "unsupported", "internal_error"
@@ -52,3 +54,4 @@ class RequestObservationInput:
     graphql_has_errors: bool | None
     duration_ms: int | None = None
     query_hash: str | None = None
+    safe_document: SafeDocument = field(default_factory=SafeDocument)

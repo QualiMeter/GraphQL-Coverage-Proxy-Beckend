@@ -1,11 +1,12 @@
 """In-memory GraphQL exchange processing for the instrumented proxy.
 
 The analyzer is injected explicitly. This module never invents covered fields
-and never persists GraphQL documents, variables, response bodies or credentials.
+and persists only masked AST copies, never raw documents, variables, response bodies or credentials.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -14,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.contracts import AnalysisResult, GraphQLQueryInput, RequestObservationInput
+from app.safe_document import SafeDocument, normalize_document
 from app.models import SchemaSnapshot, TestRun
 from app.services import ConflictError, NotFoundError, record_observation
 
@@ -101,12 +103,23 @@ async def capture_e2e_exchange(
 
     gql_input = parse_graphql_request(request_body)
     query_hash: str | None = None
+    safe_document = SafeDocument()
     if gql_input is None:
         analysis = AnalysisResult(
             status="unsupported", error_code="unsupported_request_body"
         )
     else:
-        query_hash = hashlib.sha256(gql_input.query.encode("utf-8")).hexdigest()
+        try:
+            query_hash = hashlib.sha256(gql_input.query.encode("utf-8")).hexdigest()
+        except UnicodeError:
+            # A JSON string may contain an unpaired surrogate, which has no
+            # UTF-8 query hash. Keep unknown identity instead of losing the observation.
+            query_hash = None
+        try:
+            safe_document = await asyncio.to_thread(normalize_document, gql_input.query)
+        except Exception:
+            # Optional safe representation must never invalidate an executed mutation.
+            safe_document = SafeDocument()
         try:
             analysis = await analyzer(gql_input, snapshot.schema_sdl)
         except Exception:
@@ -128,5 +141,6 @@ async def capture_e2e_exchange(
             graphql_has_errors=graphql_has_errors,
             duration_ms=duration_ms,
             query_hash=query_hash,
+            safe_document=safe_document,
         ),
     )

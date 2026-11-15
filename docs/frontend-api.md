@@ -87,9 +87,10 @@ Browser session использует HttpOnly cookie и CSRF, см. [контр�
 анонимно; приватного — с grant либо admin/CLI key. Отзыв публикации/grant
 закрывает следующие чтения, включая исторические прогоны.
 
-Фильтры `/requests`, request detail, история serviceId,
-analysisStatusCounts, P95, SDL/метаданные и безопасный документ AST входят
-в оставшиеся P0/P1. Сравнение прогонов — P2 и сейчас не реализуется.
+Фильтры `/requests`, request detail и история serviceId реализованы в этапе 4.
+Этап 5 добавляет analysisStatusCounts/P95, SDL, displayName, schema metadata и
+безопасный AST реального обращения. [Полный frontend delta](frontend-final-features.md).
+P2 не реализован.
 
 ## 3. Создать сервис
 
@@ -351,8 +352,11 @@ limit 1–500 (default 100), offset ≥ 0. SQL EXISTS исключает дуб�
 Новый `GET /api/runs/{runId}/requests/{requestId}` возвращает все поля RequestOut,
 countedInCoverage (`success AND responseHasData=true`) и уникальные selectedFields
 с typeName/fieldName/returnType из точного snapshot. Чужой request/run — 404.
-Ни raw query, ни AST, variables, cookies или response bodies не добавлены;
-фиктивный GraphQL документ не восстанавливается.
+Raw query, variables, cookies и response bodies не сохраняются.
+В detail добавлены safeGraphqlDocument/documentAvailability: нормализованная
+AST-копия реально пересланного документа, литералы/defaults маскируются;
+исторические записи — unavailable/null. Доступ только по journal ACL.
+[Состояния и лимиты](frontend-final-features.md). Фиктивный query не восстанавливается.
 [Подробности, валидация и примеры detail](frontend-history-requests.md).
 
 Пример списка:
@@ -440,7 +444,8 @@ type OperationOut = {
   (`json.dumps(..., ensure_ascii=True, separators=(",", ":"))`). Он одинаков
   для одной группы в разных прогонах; идентификатор не зависит от UUID и времени.
   Существующий хеш вычислен от текста документа: форматирование тоже может
-  менять группу. API не сохраняет текст, переменные, тела ответов или токены.
+  менять группу. API не сохраняет исходный текст, переменные, тела ответов или токены;
+  разрешена только masked AST copy в защищённом detail.
 - Нужны известные `query_hash` и `operation_type`. Обращения без этих данных
   (например, ошибка разбора или старое наблюдение без хеша) не получают
   фиктивной группы и остаются в `stats.totalRequests` и временной шкале.
@@ -493,6 +498,11 @@ type RequestTimelineBucket = {
 };
 
 type RunStats = {
+  analysisStatusCounts: {
+    success: number; parseError: number; validationError: number;
+    unsupported: number; internalError: number;
+  };
+  p95DurationMs: number | null;
   totalRequests: number;
   countedRequests: number;
   uniqueOperations: number;
@@ -524,6 +534,8 @@ type RunStats = {
   "httpErrorCount": 2,
   "graphqlErrorCount": 2,
   "avgDurationMs": 20.0,
+  "p95DurationMs": 27.0,
+  "analysisStatusCounts": {"success": 4, "parseError": 1, "validationError": 0, "unsupported": 0, "internalError": 0},
   "totalFields": 5,
   "coveredFields": 4,
   "coveragePercent": 80.0,
@@ -639,3 +651,27 @@ export async function getPublicServices() {
 `Authorization`; первый связывает операцию с активным E2E-прогоном.
 Не отправляйте `X-Coverage-Api-Key` в браузере, даже если Swagger позволяет
 вручную авторизоваться: секрет доступен владельцам серверного окружения.
+
+
+## Этап 5: оставшиеся функциональные P0/P1
+
+[Полный контракт, примеры, DTO и порядок интеграции](frontend-final-features.md).
+
+- RunStats дополнен `analysisStatusCounts` (пять camelCase категорий, сумма =
+  totalRequests) и `p95DurationMs` (PostgreSQL percentile_cont(0.95), NULL исключены).
+- `GET /api/schemas/{schemaId}/sdl` → `{schemaId, schemaHash, sdl}` по schema ACL.
+- `PATCH /api/schemas/{schemaId}` → SchemaOut; только displayName, null очищает,
+  operator + grant либо admin/CLI; cookie write требует CSRF. SchemaOut всех
+  import/list дополнен nullable displayName. Hash/SDL/ID/покрытие неизменны.
+- GraphField: description/deprecationReason/args[] с name/type/description и
+  masked defaultValue/defaultValueAvailability. GraphType: description,
+  rootOperations[], interfaces[], possibleTypes[]. CoverageGraph: rootTypes.
+  GraphRelation: стабильный UUIDv5 id от snapshot и координат поля.
+- RequestDetailOut дополнен `safeGraphqlDocument: string | null` и
+  `documentAvailability: available | redacted | unavailable`; отсутствует в
+  списке обращений и публичных агрегатах. Никаких raw queries/variables/tokens.
+
+Для старых клиентов поля только добавляются; label опционален, P95 без durations
+равен null, исторический документ недоступен. На независимую проверку этапа 6
+остаются весь P0/P1 checklist, реальная frontend-интеграция и подготовка rollout.
+P2 (сравнения/P50/P99/дополнительные distributions/timeline) не добавлен.

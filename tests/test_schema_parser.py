@@ -38,3 +38,10 @@ def test_hash_is_independent_of_sdl_whitespace():
 def test_invalid_sdl_does_not_generate_fake_schema():
     with pytest.raises(GraphQLSyntaxError):
         parse_sdl("type Query {")
+
+
+@pytest.mark.parametrize('source', ['type '+('T'*256)+' { x: String } type Query { x: String }',
+                                   'type Query { '+('f'*256)+': String }'])
+def test_schema_names_are_rejected_before_database_writes(source):
+    with pytest.raises(ValueError):
+        parse_sdl(source)

@@ -1,4 +1,4 @@
-"""Persisted domain entities. GraphQL query/variable bodies are never stored."""
+"""Persisted domain entities. Only masked query AST copies are stored; raw queries/variables never are."""
 
 import uuid
 from datetime import datetime
@@ -51,6 +51,7 @@ class SchemaSnapshot(Base):
     schema_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     schema_sdl: Mapped[str] = mapped_column(Text, nullable=False)
     introspection_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -110,6 +111,12 @@ class TestRun(Base):
 class ObservedRequest(Base):
     __tablename__ = "observed_requests"
     __table_args__ = (
+        CheckConstraint(
+            "(document_availability = 'unavailable' AND safe_graphql_document IS NULL) OR "
+            "(document_availability IN ('available', 'redacted') AND safe_graphql_document IS NOT NULL "
+            "AND octet_length(safe_graphql_document) BETWEEN 1 AND 65536)",
+            name="valid_safe_document",
+        ),
         Index("ix_requests_run_created_id", "run_id", "created_at", "id"),
         Index("ix_requests_run_duration_id", "run_id", "duration_ms", "id"),
         Index("ix_requests_run_operation_key", "run_id", "operation_key", "created_at", "id",
@@ -133,6 +140,8 @@ class ObservedRequest(Base):
     operation_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     operation_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     operation_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    safe_graphql_document: Mapped[str | None] = mapped_column(Text, nullable=True)
+    document_availability: Mapped[str] = mapped_column(String(16), nullable=False, server_default="unavailable")
     query_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     http_method: Mapped[str] = mapped_column(String(10), nullable=False)
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
