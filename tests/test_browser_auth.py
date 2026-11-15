@@ -125,3 +125,15 @@ def test_bootstrap_cli_refuses_noninteractive_password_input():
     assert response.returncode == 1
     assert "interactive terminal" in response.stderr
     assert "never-echo-this-password" not in response.stdout + response.stderr
+
+
+async def test_auth_security_boundaries_work_under_asgi_root_path():
+    transport = httpx.ASGITransport(app=app, root_path="/coverage")
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        response = await client.post("/coverage/api/auth/login", json={
+            "username": "viewer", "password": "never-echo-this" * 20,
+        })
+        assert response.status_code == 422
+        assert "never-echo-this" not in response.text
+        assert response.headers["cache-control"] == "no-store"
+        assert (await client.post("/coverage/api/auth/login", content=b"x" * 20_000)).status_code == 413

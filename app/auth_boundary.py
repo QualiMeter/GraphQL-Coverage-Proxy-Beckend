@@ -3,6 +3,14 @@
 from starlette.responses import JSONResponse
 
 
+def route_path(scope) -> str:
+    path = scope["path"]
+    root = scope.get("root_path", "")
+    if root and (path == root or path.startswith(root + "/")):
+        path = path[len(root):] or "/"
+    return path
+
+
 class AuthBoundaryMiddleware:
     def __init__(self, app):
         self.app = app
@@ -10,7 +18,8 @@ class AuthBoundaryMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        is_auth = scope["path"].startswith("/api/auth/")
+        path = route_path(scope)
+        is_auth = path.startswith("/api/auth/")
         if is_auth:
             body = bytearray()
             while True:
@@ -38,8 +47,8 @@ class AuthBoundaryMiddleware:
             receive = buffered_receive
 
         async def private_send(message):
-            if message["type"] == "http.response.start" and (scope["path"].startswith("/api/")
-                                                            or scope["path"] == "/graphql"):
+            if message["type"] == "http.response.start" and (path.startswith("/api/")
+                                                            or path == "/graphql"):
                 headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
                 headers.extend([(b"cache-control", b"no-store"), (b"vary", b"Cookie, X-Coverage-Api-Key")])
                 message = {**message, "headers": headers}

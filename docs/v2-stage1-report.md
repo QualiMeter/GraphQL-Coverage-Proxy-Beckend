@@ -40,7 +40,7 @@ SQLAlchemy 2.1.8, Pydantic 2.14.3, pytest 9.2.0. Выделенный време
 | Проверка | Результат |
 |---|---|
 | Исходная main: `pytest -q`, TEST_DATABASE_URL задан | 192 passed, 1 warning in 10.94s |
-| Финальный полный набор: `pytest -q`, TEST_DATABASE_URL задан | 222 passed, 1 warning in 33.35s |
+| Финальный полный набор: `pytest -q`, TEST_DATABASE_URL задан | 223 passed, 1 warning in 33.29s |
 | Контрольный тест PR #22 поверх ветки | 1 passed in 1.41s |
 | `alembic upgrade head` | Успешно |
 | `alembic check` | No new upgrade operations detected |
@@ -54,6 +54,8 @@ SQLAlchemy 2.1.8, Pydantic 2.14.3, pytest 9.2.0. Выделенный време
 отключались; существующее падение Swagger из описания PR #22 не воспроизвелось.
 Старые security assertions обновлены для нового реального контракта
 (API key OR cookie и общий текст 401), без исключения тестов.
+Дополнительный тест обнаружил и закрыл обход auth-защит под ASGI root_path:
+тела ограничиваются, пароли не отражаются в validation response, no-store сохраняется.
 
 PR #22 не cherry-pick и не дублируется в этом PR. Его файл взят из commit
 `638d14838ee54e5ef2825179ba3d16d9adea22db` во временный каталог; команда:
