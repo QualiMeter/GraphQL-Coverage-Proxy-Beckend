@@ -38,7 +38,7 @@ def test_visibility_and_request_details_require_key(monkeypatch):
             for headers in ({}, {API_KEY_HEADER_NAME: "bad-key"}):
                 response = client.request(method, path, json={}, headers=headers)
                 assert response.status_code == 401
-                assert response.json() == {"detail": "Invalid or missing Coverage API key"}
+                assert response.json() == {"detail": "Authentication required"}
 
 
 def test_duplicate_key_header_is_not_accepted(monkeypatch):
@@ -90,7 +90,7 @@ def test_service_list_is_public_by_default_and_admin_sees_private(monkeypatch):
 def test_openapi_exposes_key_requirement_for_proxy_and_writes():
     with TestClient(app) as client:
         paths = client.get("/openapi.json").json()["paths"]
-    assert paths["/graphql"]["post"]["security"] == [{"CoverageApiKey": []}]
-    assert paths["/api/services"]["post"]["security"] == [{"CoverageApiKey": []}]
+    assert paths["/graphql"]["post"]["security"] == [{"CoverageApiKey": []}, {"CoverageSession": []}]
+    assert paths["/api/services"]["post"]["security"] == [{"CoverageApiKey": []}, {"CoverageSession": []}]
     assert "security" not in paths["/api/services"]["get"]
 

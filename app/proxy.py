@@ -10,18 +10,22 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access import require_admin
+from app.access import require_operator
+from app.auth import Principal, visibility_kwargs
 from app.config import target_graphql_url
 from app.database import SessionFactory
 from app.e2e_capture import capture_e2e_exchange, load_run_snapshot
-from app.services import ConflictError, NotFoundError
+from app.services import ConflictError, NotFoundError, ensure_visible_snapshot
 
 
-router = APIRouter(tags=["GraphQL Proxy"])
+router = APIRouter(tags=["GraphQL Proxy"],
+                   responses={401: {"description": "Authentication required"},
+                              403: {"description": "Insufficient role or invalid Origin/CSRF"},
+                              404: {"description": "Run not found or service access denied"}})
 EXCLUDED_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
-    "host", "content-length", "x-coverage-run-id", "x-coverage-api-key",
+    "host", "content-length", "x-coverage-run-id", "x-coverage-api-key", "x-csrf-token",
 }
 MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024
 
@@ -86,19 +90,38 @@ def forwarded_headers(headers: httpx.Headers, *, strip_forwarding: bool = False)
     if strip_forwarding:
         excluded.update({"forwarded", "x-real-ip"})
         excluded.update(name.lower() for name in headers if name.lower().startswith("x-forwarded-"))
-    return [(name, value) for name, value in headers.raw if name.decode("ascii").lower() not in excluded]
+    output = []
+    reserved_cookies = {"__Host-coverage_session", "coverage_dev_session"}
+    for name, value in headers.raw:
+        lower = name.decode("ascii").lower()
+        if lower in excluded or lower.startswith("x-coverage-"):
+            continue
+        if lower == "cookie":
+            value = b"; ".join(part.strip() for part in value.split(b";")
+                               if part.strip().split(b"=", 1)[0].decode("latin1") not in reserved_cookies)
+            if not value:
+                continue
+        if lower == "set-cookie" and value.split(b"=", 1)[0].strip().decode("latin1") in reserved_cookies:
+            continue
+        output.append((name, value))
+    return output
 
 
-@router.post("/graphql", dependencies=[Depends(require_admin)])
-async def graphql_proxy(request: Request, session: AsyncSession | None = Depends(get_proxy_session)):
+@router.post("/graphql")
+async def graphql_proxy(request: Request, session: AsyncSession | None = Depends(get_proxy_session),
+                        principal: Principal = Depends(require_operator)):
     run_id = coverage_run_id(request)
     analyzer = None
+    if run_id is None and not principal.api_key:
+        raise HTTPException(status_code=400, detail="X-Coverage-Run-Id is required for browser proxy requests")
     if run_id is not None:
         analyzer = getattr(request.app.state, "coverage_analyzer", None)
         if not callable(analyzer):
             raise HTTPException(status_code=503, detail="Coverage analyzer is unavailable")
         try:
-            await load_run_snapshot(session, run_id)
+            snapshot = await load_run_snapshot(session, run_id)
+            if not principal.admin:
+                await ensure_visible_snapshot(session, snapshot.id, require_grant=True, **visibility_kwargs(principal))
         except NotFoundError:
             raise HTTPException(status_code=404, detail="Coverage run or schema snapshot not found") from None
         except ConflictError:

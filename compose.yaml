@@ -19,7 +19,9 @@ services:
     build: .
     environment:
       DATABASE_URL: postgresql+asyncpg://coverage:coverage_dev@db:5432/coverage
-      CORS_ORIGINS: http://localhost:5173
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      COVERAGE_PUBLIC_ORIGIN: ${COVERAGE_PUBLIC_ORIGIN:-https://graphql.rebyte.fun}
+      COVERAGE_DEV_MODE: ${COVERAGE_DEV_MODE:-false}
       TARGET_GRAPHQL_URL: ${TARGET_GRAPHQL_URL:-}
       COVERAGE_API_KEY: ${COVERAGE_API_KEY:-}
     ports:

@@ -1,5 +1,14 @@
 # Интеграция внешних E2E-тестов с GraphQL Coverage Proxy
 
+> Этап 1 v2.0: доверенные CLI/E2E по-прежнему используют X-Coverage-Api-Key.
+> Браузер теперь использует [cookie-сессию, роль и grant](frontend-auth.md),
+> Origin и X-CSRF-Token. В browser proxy run ID обязателен. Наша session cookie,
+> CSRF и внутренние X-Coverage-* не уходят upstream; upstream не может заменить
+> зарезервированные cookie. По-прежнему глобальный TARGET_GRAPHQL_URL: routing
+> нескольких сервисов и SSRF появятся в следующем этапе. Безопасный AST-документ
+> включён в P1 отдельным последующим этапом; исходные query/variables не хранятся.
+
+
 Документ для разработчиков бэкенда, тестов и фронтенда карты покрытия.
 Источники контракта: [app/contracts.py](../app/contracts.py),
 [REST API для фронтенда](frontend-api.md), [app/api_models.py](../app/api_models.py)

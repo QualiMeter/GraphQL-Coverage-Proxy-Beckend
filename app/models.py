@@ -144,3 +144,7 @@ class RequestFieldUsage(Base):
         PG_UUID(as_uuid=True), ForeignKey("schema_fields.id", ondelete="RESTRICT"), primary_key=True,
         index=True,
     )
+
+
+# Register additive auth models for Alembic metadata and application imports.
+from app.auth_models import BrowserSession, LoginThrottle, ServiceGrant, User  # noqa: E402, F401

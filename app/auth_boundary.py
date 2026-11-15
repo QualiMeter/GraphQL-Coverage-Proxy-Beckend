@@ -1,0 +1,48 @@
+"""Bound credential payloads and prevent shared/browser caching of API data."""
+
+from starlette.responses import JSONResponse
+
+
+class AuthBoundaryMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        is_auth = scope["path"].startswith("/api/auth/")
+        if is_auth:
+            body = bytearray()
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    return
+                body.extend(message.get("body", b""))
+                if len(body) > 16_384:
+                    response = JSONResponse({"detail": "Authentication payload too large"}, status_code=413,
+                                            headers={"Cache-Control": "no-store"})
+                    return await response(scope, receive, send)
+                if not message.get("more_body", False):
+                    break
+
+            original_receive = receive
+            delivered = False
+
+            async def buffered_receive():
+                nonlocal delivered
+                if delivered:
+                    return await original_receive()
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+            receive = buffered_receive
+
+        async def private_send(message):
+            if message["type"] == "http.response.start" and (scope["path"].startswith("/api/")
+                                                            or scope["path"] == "/graphql"):
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
+                headers.extend([(b"cache-control", b"no-store"), (b"vary", b"Cookie, X-Coverage-Api-Key")])
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, private_send)

@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import false, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,7 @@ from app.api_models import (
     RequestOut, RunOut, SchemaOut, ServiceOut,
 )
 from app.contracts import RequestObservationInput
+from app.auth_models import ServiceGrant
 from app.models import (
     GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
@@ -56,7 +57,8 @@ def run_out(row: TestRun, *, include_metadata: bool = True) -> RunOut:
 
 
 async def create_service(
-    session: AsyncSession, key: str, name: str, is_public: bool = False
+    session: AsyncSession, key: str, name: str, is_public: bool = False,
+    *, owner_id: uuid.UUID | None = None,
 ) -> ServiceOut:
     existing = await session.scalar(select(GraphQLService.id).where(GraphQLService.key == key))
     if existing is not None:
@@ -64,6 +66,9 @@ async def create_service(
     row = GraphQLService(key=key, name=name, is_public=is_public)
     session.add(row)
     try:
+        if owner_id is not None:
+            await session.flush()
+            session.add(ServiceGrant(user_id=owner_id, service_id=row.id))
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -72,10 +77,10 @@ async def create_service(
     return service_out(row)
 
 
-async def list_services(session: AsyncSession, *, public_only: bool = False) -> list[ServiceOut]:
+async def list_services(session: AsyncSession, *, public_only: bool = False, user_id: uuid.UUID | None = None) -> list[ServiceOut]:
     stmt = select(GraphQLService).order_by(GraphQLService.name)
     if public_only:
-        stmt = stmt.where(GraphQLService.is_public.is_(True))
+        stmt = stmt.where(_visible_service(user_id))
     rows = (await session.scalars(stmt)).all()
     return [service_out(row) for row in rows]
 
@@ -94,30 +99,40 @@ async def change_service_visibility(
     return service_out(row)
 
 
+def _visible_service(user_id: uuid.UUID | None, *, require_grant: bool = False):
+    grant = (select(ServiceGrant.user_id).where(
+        ServiceGrant.user_id == user_id, ServiceGrant.service_id == GraphQLService.id,
+    ).exists() if user_id is not None else false())
+    return grant if require_grant else or_(GraphQLService.is_public.is_(True), grant)
+
+
 async def ensure_visible_service(
-    session: AsyncSession, service_id: uuid.UUID, *, admin: bool
+    session: AsyncSession, service_id: uuid.UUID, *, admin: bool, user_id: uuid.UUID | None = None,
+    require_grant: bool = False,
 ) -> None:
     stmt = select(GraphQLService.id).where(GraphQLService.id == service_id)
     if not admin:
-        stmt = stmt.where(GraphQLService.is_public.is_(True))
+        stmt = stmt.where(_visible_service(user_id, require_grant=require_grant))
     if await session.scalar(stmt) is None:
         # Do not reveal the existence of private resources to anonymous callers.
         raise NotFoundError("GraphQL service not found")
 
 
 async def ensure_visible_snapshot(
-    session: AsyncSession, snapshot_id: uuid.UUID, *, admin: bool
+    session: AsyncSession, snapshot_id: uuid.UUID, *, admin: bool, user_id: uuid.UUID | None = None,
+    require_grant: bool = False,
 ) -> None:
     service_id = await session.scalar(
         select(SchemaSnapshot.service_id).where(SchemaSnapshot.id == snapshot_id)
     )
     if service_id is None:
         raise NotFoundError("Schema snapshot not found")
-    await ensure_visible_service(session, service_id, admin=admin)
+    await ensure_visible_service(session, service_id, admin=admin, user_id=user_id, require_grant=require_grant)
 
 
 async def ensure_visible_run(
-    session: AsyncSession, run_id: uuid.UUID, *, admin: bool
+    session: AsyncSession, run_id: uuid.UUID, *, admin: bool, user_id: uuid.UUID | None = None,
+    require_grant: bool = False,
 ) -> None:
     service_id = await session.scalar(
         select(SchemaSnapshot.service_id)
@@ -126,7 +141,7 @@ async def ensure_visible_run(
     )
     if service_id is None:
         raise NotFoundError("Test run not found")
-    await ensure_visible_service(session, service_id, admin=admin)
+    await ensure_visible_service(session, service_id, admin=admin, user_id=user_id, require_grant=require_grant)
 
 
 async def _save_parsed_schema(
