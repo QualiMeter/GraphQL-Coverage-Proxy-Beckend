@@ -10,13 +10,13 @@ import httpx
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import proxy
 from app.database import get_session, get_session_factory
 from app.main import app
 from app.models import GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
-from app.services import ConflictError, create_run, create_service, finish_run, import_sdl, update_service
+from app.services import ConflictError, create_run, create_service, import_sdl, update_service
 from app.upstream import PinnedTransport
 from test_graphql_proxy import TEST_ADMIN_KEY, raw_response
 from test_browser_auth_postgres import auth_context, login, grant  # noqa: F401

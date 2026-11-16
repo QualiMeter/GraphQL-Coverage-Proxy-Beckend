@@ -1,4 +1,4 @@
-"""Stage 5 on genuine PostgreSQL: percentile, safe wire AST, metadata and ACL."""
+"""PostgreSQL checks for percentiles, safe wire AST, schema metadata and ACL."""
 
 import asyncio
 import hashlib
@@ -22,7 +22,7 @@ from app.auth_models import ServiceGrant
 from app.database import get_session, get_session_factory
 from app.e2e_capture import capture_e2e_exchange
 from app.main import app
-from app.models import GraphQLService, ObservedRequest, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
+from app.models import GraphQLService, ObservedRequest, SchemaField, SchemaSnapshot, SchemaType
 from app.run_analytics import get_run_stats, operation_key
 from app.services import create_run, create_service, finish_run, get_run_graph, import_sdl
 from app.upstream import PinnedTransport
@@ -309,8 +309,11 @@ async def test_historical_migration_and_safe_document_constraints(isolated_datab
     await migrate('upgrade','head')
     async with isolated_database() as session:
         after=(await session.execute(text('SELECT to_jsonb(t) FROM observed_requests t'))).scalar()
-        assert {k:v for k,v in after.items() if k not in ('safe_graphql_document','document_availability')}==before
+        assert {k:v for k,v in after.items() if k not in ('safe_graphql_document','document_availability',
+            'graphql_error_count','graphql_error_details','graphql_error_details_availability')}==before
         assert after['safe_graphql_document'] is None and after['document_availability']=='unavailable'
+        assert after['graphql_error_count'] is None and after['graphql_error_details'] is None
+        assert after['graphql_error_details_availability'] == 'unavailable'
         assert (await session.get(SchemaSnapshot,snapshot.id)).display_name is None
         for document,status in ((None,'available'),('{ field }','unavailable'),('x'*65537,'redacted'),('', 'available'),(None,'unknown')):
             with pytest.raises(IntegrityError):

@@ -1,4 +1,4 @@
-# Outbound transport и SSRF: этап 2
+# Outbound transport и SSRF
 
 `app/upstream.py` — единая политика для endpoint CRUD, proxy и service-aware
 introspection. На сохранении и перед каждым обменом проверяются URL и все
@@ -36,7 +36,9 @@ worker (переполнение 503 без отправки). Ответ буф
 на DNS/HTTP fetch. Он использует общий лимит 16 jobs с proxy, удерживая слот
 до конца нормализации в worker thread. Дополнительные пределы: 200000 JSON nodes,
 глубина 64, до 5000 типов/50000 полей, имена до 255 символов.
-[Подробности и upstream auth](service-introspection.md). Тела, query/variables/credentials/ответы не пишутся в БД или логи.
+[Подробности и upstream auth](service-introspection.md). Raw query, runtime variables, credentials и response bodies не пишутся в БД или логи.
+Допускаются [masked AST](frontend-final-features.md) и
+[очищенные error metadata](graphql-error-details.md) в защищённом detail.
 Не включать стороннее middleware/debug-логирование тел и заголовков.
 
 Service row FOR UPDATE сериализует создание run и изменение конфигурации.

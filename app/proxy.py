@@ -128,8 +128,7 @@ def forwarded_headers(
 def trusted_e2e_cookies(request: Request, principal: Principal) -> bool:
     # API-key authentication is explicit, unlike ambient browser cookies. Even
     # with a valid key, browser-shaped requests never get cookie passthrough.
-    # Keep this per-exchange policy when upstream routing becomes multi-service;
-    # never introduce a shared cookie jar or a global cookie-name allowlist.
+    # Cookie isolation is per exchange; never share a jar across services.
     return principal.api_key and not any(
         name.lower() == "origin" or name.lower().startswith("sec-fetch-")
         for name in request.headers

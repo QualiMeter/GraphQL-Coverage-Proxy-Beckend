@@ -25,8 +25,10 @@ Frontend, demo GraphQL API и конфигурация Nginx в Compose не в�
 
 ## Авторизация за Nginx и Docker
 
-Перед merge PR #23 обязательно следовать [порядку слияния и выпуска](PR23-RELEASE.md):
-существующий push main может запустить autodeploy. Сам PR ничего не разворачивает.
+Push main может запустить autodeploy; согласуйте выпуск с оператором заранее.
+[Исторический порядок внедрения auth](PR23-RELEASE.md) и
+[установка root-owned deploy script](RELIABILITY-RELEASE.md) описывают отдельные
+сценарии; их условия и состояние production нужно проверить перед применением.
 
 Nginx завершает TLS на host; API за loopback port mapping видит HTTP и Docker peer.
 Production entry point `python -m app.server` явно включает proxy_headers и доверяет
@@ -48,8 +50,8 @@ cd /opt/graphql-coverage
 ```
 
 Команда клонирования предполагает пустой каталог и доступ этой учётной записи
-к репозиторию. После слияния PR файлы будут в `main`; для проверки PR до слияния
-вместо `--branch main` укажите `--branch chore/vps-compose`.
+к репозиторию. Для проверки PR используйте отдельное тестовое окружение
+с согласованным commit SHA.
 Не используйте общий каталог или `.env` проекта Vitrina.
 
 Во всех следующих командах рабочий каталог — `/opt/graphql-coverage`.
@@ -86,16 +88,18 @@ ${EDITOR:-nano} deploy/.env
 | --- | --- |
 | `API_PORT` | Порт на loopback хоста; по умолчанию `5081` |
 | `API_ROOT_PATH` | Публичный префикс, который Nginx убирает при проксировании; если не задан — `/coverage`, для отдельного домена `graphql.rebyte.fun` установить `API_ROOT_PATH=` (пустое значение) |
-| `TARGET_GRAPHQL_URL` | Необязательный URL целевого GraphQL API; можно оставить пустым |
-| `COVERAGE_API_KEY` | Секрет длиной от 32 символов для приватных REST-операций и `/graphql`; `openssl rand -hex 32`; хранить только в `deploy/.env` |
+| `COVERAGE_LEGACY_PROXY` | По умолчанию false; временный CLI passthrough без run ID и fallback для старых NULL endpoint |
+| `TARGET_GRAPHQL_URL` | URL только для явно включённого legacy-режима |
+| `COVERAGE_API_KEY` | Admin key для доверенного CLI/CI, от 32 ASCII-символов; `openssl rand -hex 32`; browser использует session/CSRF |
 | `FORWARDED_ALLOW_IPS` | Обязательные точные IP непосредственного Nginx peer после Docker NAT; определить на staging, не угадывать gateway и не доверять подсетям |
 | `COVERAGE_PUBLIC_ORIGIN` | Точный browser Origin; по умолчанию https://graphql.rebyte.fun, без пути и завершающего slash |
 | `CORS_ORIGINS` | Разрешённые origins через запятую, например `https://coverage.example.com`; пустое значение отключает cross-origin доступ |
 
-Текущий backend использует `TARGET_GRAPHQL_URL` для `/graphql` и импорта схемы
-через introspection. Если URL не задан, `/graphql` вернёт 503, но REST/health
-продолжат работать. При настройке URL учтите, что `127.0.0.1` внутри
-API-контейнера указывает на сам контейнер.
+Upstream выбирается по run → snapshot → service.endpointUrl; introspection
+использует endpoint выбранного сервиса. Глобальный target действует только при
+явном legacy-режиме. Без run ID proxy даёт 400 (кроме legacy CLI);
+сервис без endpoint — 409. В production SSRF policy запрещает private/loopback
+upstream: не используйте dev-настройки для обхода этого ограничения.
 Для CORS задавайте точные origins со схемой и при необходимости портом,
 без пути и завершающего `/`; wildcard в production не используйте.
 

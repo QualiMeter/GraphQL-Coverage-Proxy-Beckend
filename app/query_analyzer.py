@@ -147,7 +147,7 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
 
 
 def _has_unsupported_selection(operation: OperationDefinitionNode) -> bool:
-    """Detect constructs whose field expansion is outside the MVP contract."""
+    """Reject selections whose executed fields cannot be determined safely."""
     if _has_unsupported_directive(operation.directives or ()):
         return True
 

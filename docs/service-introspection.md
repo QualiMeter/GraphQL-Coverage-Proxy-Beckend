@@ -1,8 +1,7 @@
 # Service-aware introspection: устройство и ограничения
 
-Этап 3, база main 09659aed51f91dd6e93d95a3818497901c96349c. Миграции не нужны:
-используются SchemaSnapshot, SchemaType, SchemaField и существующий UNIQUE
-(service_id, schema_hash). Coverage Engine, /graphql и модель RBAC не меняются.
+Импорт использует SchemaSnapshot, SchemaType, SchemaField и UNIQUE
+(service_id, schema_hash). Внешний контракт: [frontend-introspection.md](frontend-introspection.md).
 
 ## Путь запроса
 
@@ -14,7 +13,7 @@ POST /api/schemas/import/introspection проверяет operator/admin и cook
 COVERAGE_LEGACY_PROXY=true + TARGET_GRAPHQL_URL. Без настройки — 409.
 
 Collector выполняет обычный get_introspection_query() graphql-core. Используются
-validate_endpoint и PinnedTransport этапа 2: все DNS IP проверяются непосредственно
+общие validate_endpoint и PinnedTransport: все DNS IP проверяются непосредственно
 перед HTTP, сокет подключается к проверенному числовому IP и проверяется peer,
 TLS SNI и certificate hostname сохраняют исходное имя. HTTPS:443 production,
 локальный HTTP — только explicit dev + точный origin allowlist. Нет redirects,
@@ -100,7 +99,7 @@ owned transaction/session contexts откатывают весь импорт. �
 
 ## Upstream-аутентификация
 
-В этом PR её нет: закрытый API возвращает безопасную ошибку, применяется ручной SDL.
+Upstream-аутентификация collector не реализована: для закрытого API применяется ручной SDL.
 Нельзя помещать upstream токен в endpoint query/userinfo, description, browser
 localStorage, публичный JS или произвольные API headers для пересылки.
 

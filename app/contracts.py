@@ -1,10 +1,11 @@
-"""Shared contract with future proxy and GraphQL analyzer developers."""
+"""Shared types for GraphQL analysis and observation storage."""
 
 import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
 from app.safe_document import SafeDocument
+from app.graphql_errors import ErrorSummary
 
 
 AnalysisStatus = Literal[
@@ -30,12 +31,7 @@ class GraphQLQueryInput:
 
 @dataclass(frozen=True)
 class AnalysisResult:
-    """Shared analyzer result consumed by coverage storage.
-
-    A successful result contains unique ``(type_name, field_name)`` schema
-    coordinates for the selected fields. Failed or unsupported analyses must
-    use an empty ``fields`` tuple.
-    """
+    """Unique selected schema coordinates; unsuccessful analyses have no fields."""
 
     status: AnalysisStatus
     operation_type: OperationType | None = None
@@ -55,3 +51,4 @@ class RequestObservationInput:
     duration_ms: int | None = None
     query_hash: str | None = None
     safe_document: SafeDocument = field(default_factory=SafeDocument)
+    graphql_errors: ErrorSummary = field(default_factory=ErrorSummary)

@@ -8,9 +8,8 @@ import pytest
 from graphql import build_schema, get_introspection_query, graphql_sync
 from sqlalchemy import func, select, text
 
-from app.main import app
-from app.models import GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
-from app.services import create_service, import_sdl, import_introspection_schema, create_run, record_observation, SchemaEndpointChanged, update_service
+from app.models import GraphQLService, SchemaField, SchemaSnapshot, SchemaType
+from app.services import create_service, import_sdl, create_run, record_observation, update_service
 from app.contracts import AnalysisResult, FieldReference, RequestObservationInput
 from app.schema_parser import parse_sdl
 from app.upstream import PinnedTransport

@@ -117,6 +117,22 @@ class ObservedRequest(Base):
             "AND octet_length(safe_graphql_document) BETWEEN 1 AND 65536)",
             name="valid_safe_document",
         ),
+        CheckConstraint(
+            "graphql_error_count IS NULL OR graphql_error_count BETWEEN 0 AND 1048576",
+            name="valid_graphql_error_count",
+        ),
+        CheckConstraint("""
+            (graphql_error_details_availability = 'unavailable' AND graphql_error_details IS NULL) OR
+            (graphql_error_details_availability IN ('sanitized', 'truncated')
+            AND graphql_error_count IS NOT NULL AND graphql_error_details IS NOT NULL
+            AND CASE WHEN jsonb_typeof(graphql_error_details) = 'array' THEN
+            jsonb_array_length(graphql_error_details) <= 20
+            AND jsonb_array_length(graphql_error_details) <= graphql_error_count
+            AND (graphql_error_details_availability = 'truncated' OR jsonb_array_length(graphql_error_details) = graphql_error_count)
+            ELSE false END
+            AND octet_length(graphql_error_details::text) <= 16384
+            AND graphql_has_errors IS NOT NULL AND graphql_has_errors = (graphql_error_count > 0))
+            """, name="valid_graphql_error_details"),
         Index("ix_requests_run_created_id", "run_id", "created_at", "id"),
         Index("ix_requests_run_duration_id", "run_id", "duration_ms", "id"),
         Index("ix_requests_run_operation_key", "run_id", "operation_key", "created_at", "id",
@@ -148,6 +164,10 @@ class ObservedRequest(Base):
     analysis_status: Mapped[str] = mapped_column(String(30), nullable=False)
     response_has_data: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     graphql_has_errors: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    graphql_error_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    graphql_error_details_availability: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="unavailable")
+    graphql_error_details: Mapped[list[dict] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

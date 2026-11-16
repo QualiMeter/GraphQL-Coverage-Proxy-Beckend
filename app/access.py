@@ -1,8 +1,4 @@
-"""Role and CSRF checks for sessions, with constant-time trusted CLI-key authentication.
-
-The administrative key is not a GraphQL upstream credential. In particular,
-the proxy must never forward it to TARGET_GRAPHQL_URL.
-"""
+"""Session roles/CSRF and CLI authentication; never forward the CLI key upstream."""
 
 import hmac
 import os
@@ -35,9 +31,6 @@ def is_admin(request: Request) -> bool:
         and hmac.compare_digest(provided[0], expected)
     )
 
-
-# Keep the constant-time CLI-key helpers above; browser access uses a distinct,
-# revocable credential with explicit roles and per-service grants.
 
 _cookie_scheme = APIKeyCookie(name=cookie_name(), scheme_name="CoverageSession", auto_error=False)
 ROLE_RANK = {"viewer": 0, "analyst": 1, "operator": 2, "admin": 3}
