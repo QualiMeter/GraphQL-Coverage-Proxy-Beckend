@@ -1,3 +1,5 @@
+"""Independent audit regressions on isolated PostgreSQL and real HTTP routes."""
+
 import asyncio
 import hashlib
 import json
@@ -38,6 +40,7 @@ CURRENT_REVISION = "20261119_operation_name_text"
 
 @pytest.fixture
 async def pool_context(isolated_database, monkeypatch):
+    # Match SQLAlchemy's standard 5+10 capacity; only shorten failure timeout.
     engine = create_async_engine(isolated_database.kw["bind"].url,
                                  pool_size=5, max_overflow=10, pool_timeout=.5)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -197,6 +200,7 @@ async def test_mutation_commit_failure_never_repeats_upstream(pool_context, monk
 async def test_run_metadata_policy_for_all_responses(auth_context, postgres_session, role):
     client, users, private, _, snapshot, _, run, _ = auth_context
     marker = {"private": "stage6-admin-only-marker"}
+    # Admin creates the marked run through the real API, then another identity reads/finishes it.
     admin_headers, _ = await login(client, "admin")
     assert (await client.post(f"/api/runs/{run.id}/finish", headers=admin_headers)).status_code == 200
     created = await client.post("/api/runs", json={"snapshotId": str(snapshot.id), "name": "Marked", "metadata": marker}, headers=admin_headers)
@@ -294,19 +298,24 @@ async def test_operation_name_migration_preserves_rows_and_refuses_lossy_downgra
     assert await column_type() == "character varying"
     async with isolated_database() as session:
         for name in (None, "Legacy", "N" * 255):
-            session.add(ObservedRequest(run_id=run.id, operation_name=name, operation_type="query", query_hash="a" * 64,
-                                        http_method="POST", analysis_status="success", duration_ms=42))
+            # Insert the historical column set, independent of current ORM columns.
+            await session.execute(text("""INSERT INTO observed_requests
+                (id,run_id,operation_name,operation_type,query_hash,http_method,analysis_status,duration_ms)
+                VALUES (gen_random_uuid(),:run,:name,'query',:hash,'POST','success',42)"""),
+                {"run": run.id, "name": name, "hash": "a" * 64})
         await session.commit()
     before = await rows()
-    await migrate("upgrade", "head")
+    await migrate("upgrade", CURRENT_REVISION)
     assert await column_type() == "text" and await rows() == before
-    await migrate("check")
+    # Safe downgrade remains supported, including null and boundary names.
     await migrate("downgrade", PREVIOUS_REVISION)
     assert await rows() == before
-    await migrate("upgrade", "head")
+    await migrate("upgrade", CURRENT_REVISION)
     async with isolated_database() as session:
-        session.add(ObservedRequest(run_id=run.id, operation_name="N" * 256, operation_type="mutation",
-                                    query_hash="b" * 64, http_method="POST", analysis_status="success"))
+        await session.execute(text("""INSERT INTO observed_requests
+            (id,run_id,operation_name,operation_type,query_hash,http_method,analysis_status)
+            VALUES (gen_random_uuid(),:run,:name,'mutation',:hash,'POST','success')"""),
+            {"run": run.id, "name": "N" * 256, "hash": "b" * 64})
         await session.commit()
     with_long_name = await rows()
     failed = await migrate("downgrade", PREVIOUS_REVISION, success=False)
@@ -314,4 +323,5 @@ async def test_operation_name_migration_preserves_rows_and_refuses_lossy_downgra
     assert await column_type() == "text" and await rows() == with_long_name
     async with isolated_database() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
+    await migrate("upgrade", "head")
     await migrate("check")

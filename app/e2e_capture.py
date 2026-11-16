@@ -1,8 +1,4 @@
-"""In-memory GraphQL exchange processing for the instrumented proxy.
-
-The analyzer is injected explicitly. This module never invents covered fields
-and persists only masked AST copies, never raw documents, variables, response bodies or credentials.
-"""
+"""Capture a completed GraphQL exchange without persisting raw bodies."""
 
 from __future__ import annotations
 
@@ -14,6 +10,8 @@ from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.graphql_errors import ErrorSummary, error_count, response_envelope, sanitize_errors
+from app.schema_work import schema_work
 from app.diagnostics import diagnostic_run, internal_failure
 from app.contracts import AnalysisResult, GraphQLQueryInput, RequestObservationInput
 from app.safe_document import SafeDocument, normalize_document
@@ -25,6 +23,7 @@ Analyzer = Callable[[GraphQLQueryInput, str], Awaitable[AnalysisResult]]
 
 
 def parse_graphql_request(body: bytes) -> GraphQLQueryInput | None:
+    """Decode a single standard GraphQL-over-HTTP JSON request, if supported."""
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError, RecursionError):
@@ -56,21 +55,12 @@ def graphql_response_flags(decoded_body: bytes | None) -> tuple[bool | None, boo
     The caller passes a *decoded* response body. For compressed responses,
     network failures, or non-JSON responses it can pass None to avoid guessing.
     """
-    if decoded_body is None:
-        return None, None
-    try:
-        payload = json.loads(decoded_body)
-    except (ValueError, UnicodeDecodeError, RecursionError):
-        return None, None
-    if not isinstance(payload, dict):
-        return None, None
-    # `data: null` is not evidence that any selected field produced usable data.
-    # A partial object with errors may still count selected (not necessarily
-    # successfully resolved) fields; the dashboard describes that limitation.
-    return isinstance(payload.get("data"), dict), bool(payload.get("errors"))
+    _, has_data, has_errors = response_envelope(decoded_body)
+    return has_data, has_errors
 
 
 async def load_run_snapshot(session: AsyncSession, run_id: uuid.UUID) -> SchemaSnapshot:
+    """Resolve only the specified running run and its immutable schema snapshot."""
     run = await session.get(TestRun, run_id, populate_existing=True)
     if run is None:
         raise NotFoundError("Test run not found")
@@ -131,7 +121,20 @@ async def capture_e2e_exchange(
                     status="internal_error", error_code="analyzer_failure"
                 )
 
-    response_has_data, graphql_has_errors = graphql_response_flags(decoded_response_body)
+    # Keep established flags/count even if optional sanitization fails.
+    payload, response_has_data, graphql_has_errors = await schema_work(
+        response_envelope, decoded_response_body,
+    )
+    summary = ErrorSummary()
+    try:
+        summary = ErrorSummary(count=await schema_work(error_count, payload))
+        summary = await schema_work(
+            sanitize_errors, payload, gql_input.query if gql_input else None,
+            gql_input.operation_name if gql_input else None, snapshot.schema_sdl,
+        )
+    except Exception:
+        # Never emit upstream exceptions; CancelledError still propagates.
+        pass
     return await record_observation(
         session,
         RequestObservationInput(
@@ -141,6 +144,7 @@ async def capture_e2e_exchange(
             http_status=http_status,
             response_has_data=response_has_data,
             graphql_has_errors=graphql_has_errors,
+            graphql_errors=summary,
             duration_ms=duration_ms,
             query_hash=query_hash,
             safe_document=safe_document,

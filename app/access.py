@@ -1,3 +1,5 @@
+"""Session roles/CSRF and CLI authentication; never forward the CLI key upstream."""
+
 import hmac
 import os
 
@@ -15,6 +17,7 @@ _api_key_scheme = APIKeyHeader(
 
 def configured_api_key() -> str | None:
     value = os.environ.get("COVERAGE_API_KEY", "")
+    # Refuse short or accidentally unset production secrets.
     return value if len(value) >= 32 and value.isascii() else None
 
 
@@ -27,7 +30,6 @@ def is_admin(request: Request) -> bool:
         and provided[0].isascii()
         and hmac.compare_digest(provided[0], expected)
     )
-
 
 
 _cookie_scheme = APIKeyCookie(name=cookie_name(), scheme_name="CoverageSession", auto_error=False)

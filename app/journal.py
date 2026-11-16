@@ -1,3 +1,5 @@
+"""SQL pagination and snapshot-scoped journal reads. No bodies are reconstructed."""
+
 import re
 import uuid
 from datetime import timezone
@@ -141,6 +143,8 @@ async def list_request_page(session: AsyncSession, run_id: uuid.UUID, filters: R
     tie = ObservedRequest.id.asc() if filters.sort_order == "asc" else ObservedRequest.id.desc()
     rows = (await session.scalars(select(ObservedRequest).options(
         defer(ObservedRequest.safe_graphql_document), defer(ObservedRequest.document_availability),
+        defer(ObservedRequest.graphql_error_details), defer(ObservedRequest.graphql_error_count),
+        defer(ObservedRequest.graphql_error_details_availability),
     ).where(*conditions)
         .order_by(order.nulls_last(), tie).limit(filters.limit).offset(filters.offset))).all()
     return [request_out(row) for row in rows], total
@@ -162,5 +166,8 @@ async def get_request_detail(session: AsyncSession, run_id: uuid.UUID, request_i
         .distinct().order_by(SchemaType.name, SchemaField.name, SchemaField.return_type))).all()
     return RequestDetailOut(**request_out(row).model_dump(),
         safe_graphql_document=row.safe_graphql_document, document_availability=row.document_availability,
+        graphql_error_count=row.graphql_error_count,
+        graphql_error_details_availability=row.graphql_error_details_availability,
+        graphql_error_details=row.graphql_error_details,
         counted_in_coverage=row.analysis_status == "success" and row.response_has_data is True,
         selected_fields=[SelectedFieldOut(type_name=t, field_name=f, return_type=r) for t, f, r in fields])

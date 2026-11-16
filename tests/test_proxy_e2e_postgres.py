@@ -1,3 +1,5 @@
+"""Exercise POST /graphql through the real capture/storage/coverage pipeline."""
+
 import gzip
 import hashlib
 import json
@@ -140,6 +142,7 @@ async def test_http_exchange_committed_before_response_and_correct_snapshot(
     requests = upstream(lambda request: raw_response(201, wire, [
         ("Content-Encoding", "gzip"), ("Set-Cookie", "a=1"), ("Set-Cookie", "b=2"),
     ]))
+    # Real commit, rather than merely an INSERT/flush, must finish before response.
     commits = []
     real_commit = session.commit
 
@@ -170,6 +173,8 @@ async def test_http_exchange_committed_before_response_and_correct_snapshot(
     assert row.http_status == 201 and row.http_method == "POST"
     assert row.duration_ms is not None and row.duration_ms >= 0
     assert row.response_has_data is True and row.graphql_has_errors is True
+    assert row.graphql_error_count == 1 and row.graphql_error_details_availability == "sanitized"
+    assert row.graphql_error_details == [{"code": None, "path": None, "locations": [], "safeMessage": None}]
     field_snapshots = (await session.scalars(
         select(SchemaType.snapshot_id).join(SchemaField, SchemaField.type_id == SchemaType.id)
         .join(RequestFieldUsage, RequestFieldUsage.field_id == SchemaField.id)
@@ -187,6 +192,7 @@ async def test_http_exchange_committed_before_response_and_correct_snapshot(
     journal = await http_client.get(f"/api/runs/{run.id}/requests")
     assert journal.json()[0]["analysisStatus"] == "success"
 
+    # Inspect actual persisted column values, not ORM reprs (which omit values).
     persisted = []
     for table in Base.metadata.sorted_tables:
         persisted.extend(dict(row) for row in (await session.execute(select(table))).mappings())
@@ -224,6 +230,7 @@ async def test_failures_never_invent_coverage(
 ):
     session = postgres_session
     run, _, _ = await make_run(session)
+    # Hold an identity-map reference to expose stale run state in the row-lock check.
     cached_run = await session.get(Run, run.id)
 
     async def analyzer(*args):
@@ -252,6 +259,7 @@ async def test_failures_never_invent_coverage(
     if case in {"foreign_field", "finish_during_analysis", "commit_failure"}:
         assert response.status_code == 502
         assert "upstream may have executed" in response.text
+        # Roll back as a production request-scoped session does on close.
         await session.rollback()
         assert (await session.scalars(select(ObservedRequest))).all() == []
     else:
@@ -302,6 +310,10 @@ async def test_unverifiable_response_never_claims_data_or_coverage(
     assert row.analysis_status == "success"
     assert row.response_has_data is (False if case == "errors_only" else None)
     assert row.graphql_has_errors is (True if case == "errors_only" else None)
+    assert row.graphql_error_count == (1 if case == "errors_only" else None)
+    assert row.graphql_error_details_availability == ("sanitized" if case == "errors_only" else "unavailable")
+    assert row.graphql_error_details == ([{"code": None, "path": None, "locations": [], "safeMessage": None}]
+                                         if case == "errors_only" else None)
     graph = (await http_client.get(f"/api/runs/{run.id}/coverage")).json()
     assert graph["summary"]["coveredFields"] == 0
 

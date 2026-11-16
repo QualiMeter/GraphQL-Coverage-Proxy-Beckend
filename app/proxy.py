@@ -1,3 +1,5 @@
+"""Transparent HTTP proxy with opt-in, synchronous E2E observation capture."""
+
 import asyncio
 import time
 import uuid
@@ -96,6 +98,7 @@ def decoded_response_copy(content: bytes, headers: httpx.Headers) -> bytes | Non
 def forwarded_headers(
     headers: httpx.Headers, *, strip_forwarding: bool = False, allow_cookies: bool = False,
 ) -> list[tuple[bytes, bytes]]:
+    """Cookies are denied unless the caller selected trusted, non-browser E2E mode."""
     excluded = EXCLUDED_HEADERS | {
         token.strip().lower()
         for value in headers.get_list("connection")
@@ -125,8 +128,7 @@ def forwarded_headers(
 def trusted_e2e_cookies(request: Request, principal: Principal) -> bool:
     # API-key authentication is explicit, unlike ambient browser cookies. Even
     # with a valid key, browser-shaped requests never get cookie passthrough.
-    # Keep this per-exchange policy when upstream routing becomes multi-service;
-    # never introduce a shared cookie jar or a global cookie-name allowlist.
+    # Cookie isolation is per exchange; never share a jar across services.
     return principal.api_key and not any(
         name.lower() == "origin" or name.lower().startswith("sec-fetch-")
         for name in request.headers

@@ -1,7 +1,6 @@
 # Frontend: multi-service и introspection v2.0
 
-Этапы 2–3, база этапа 3 — main `09659aed51f91dd6e93d95a3818497901c96349c` (PR #24).
-Multi-service proxy и introspection; production ещё требует отдельного принятия и выкладки.
+Контракт сервисов и выбора upstream в текущем коде.
 Cookie/CSRF, роли и ACL из [frontend-auth.md](frontend-auth.md) сохраняются.
 Все пути относительные, same-origin; административный ключ остаётся только на сервере.
 
@@ -39,7 +38,7 @@ key после создания не редактируется. Description п�
 
 Рекомендуемый порядок интеграции:
 
-1. Подключить login/session, CSRF и grants согласно этапу 1.
+1. Подключить login/session, CSRF и grants согласно [контракту авторизации](frontend-auth.md).
 2. Добавить endpointUrl/description в форму создания и редактирования сервиса.
 3. Обработать nullable/скрытый endpointUrl без подстановки фиктивного значения.
 4. Импортировать introspection выбранного сервиса (либо SDL), создать run по snapshotId.
@@ -51,8 +50,7 @@ key после создания не редактируется. Description п�
 Изменяющие browser-запросы содержат Origin и X-CSRF-Token, cookie автоматически
 передаёт браузер. Upstream Authorization разрешён; все browser cookies и Set-Cookie
 отбрасываются, X-Coverage-* и CSRF не пересылаются. Хранить API key в UI запрещено.
-Ответы no-store. Новых CORS-настроек и новых pagination-заголовков этап 2 не добавляет;
-существующий X-Total-Count журнала сохраняется.
+Ответы no-store. История и журнал возвращают X-Total-Count до pagination.
 
 Ошибки: 400 — run ID отсутствует/невалиден; 401/403 — auth/роль/CSRF;
 404 — отсутствующая или недоступная запись; 409 — неактивный run/нет endpoint/
@@ -62,5 +60,7 @@ key после создания не редактируется. Description п�
 502/504 — ошибка upstream или сохранения после отправки. Для 502/504 операция
 могла выполниться: UI и E2E не должны автоматически повторять mutation.
 
-Run history, request detail, P95 и безопасный AST не входят в этот PR.
+[История и request detail](frontend-history-requests.md),
+[P95 и безопасный AST](frontend-final-features.md),
+[очищенные GraphQL-ошибки](graphql-error-details.md) описаны отдельно.
 Актуальная OpenAPI генерируется FastAPI: `/openapi.json`.

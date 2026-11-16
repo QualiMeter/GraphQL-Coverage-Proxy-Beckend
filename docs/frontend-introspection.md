@@ -1,7 +1,4 @@
-# Frontend: service-aware introspection, этап 3
-
-База: main `09659aed51f91dd6e93d95a3818497901c96349c`, PR #24 принят.
-Этот контракт относится к новой ветке; production не меняется при создании PR.
+# Frontend: service-aware introspection
 
 Порядок: **Service → Introspection → SchemaSnapshot → TestRun → GraphQL Proxy → Coverage**.
 
@@ -86,9 +83,8 @@ Dedup остаётся serviceId + schemaHash по нормализованно�
 cookie authentication). После fetch заново проверяются session/роль/grant и
 endpoint: отзыв grant — 404, роль — 403, отозванная/истёкшая session либо блокировка
 пользователя — 401, смена endpoint — SERVICE_ENDPOINT_CHANGED без сохранения.
-Новых endpoints/DTO/миграций эта доработка не добавляет.
-
-Миграций и изменений SchemaOut/RunOut нет. SDL download, displayName, расширенные
-DTO графа, история, аналитика запросов и безопасный AST здесь не добавляются.
+SchemaOut также содержит nullable displayName.
+SDL download и schema metadata описаны в [расширенных DTO](frontend-final-features.md),
+история и аналитика — в [общем API-контракте](frontend-api.md).
 Закрытые API с upstream-аутентификацией пока импортируют SDL: [архитектурное
 предложение](service-introspection.md#upstream-аутентификация).

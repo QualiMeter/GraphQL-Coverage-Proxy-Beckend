@@ -1,3 +1,5 @@
+"""Production Uvicorn entry point with an explicit, narrow proxy trust boundary."""
+
 import argparse
 import ipaddress
 import os
@@ -28,7 +30,7 @@ def server_config() -> uvicorn.Config:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Production Uvicorn entry point with an explicit, narrow proxy trust boundary.")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-config", action="store_true", help="Validate proxy trust without starting or migrating")
     args = parser.parse_args()
     try:

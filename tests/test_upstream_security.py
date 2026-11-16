@@ -1,3 +1,4 @@
+"""SSRF policy and actual httpcore socket boundary (not a mocked HTTP client)."""
 import asyncio
 import socket
 import ssl
@@ -6,7 +7,7 @@ import httpcore
 import httpx
 import pytest
 
-from app.upstream import PinnedBackend, PinnedTransport, UnsafeEndpoint, validate_endpoint, outbound_slot
+from app.upstream import PinnedTransport, UnsafeEndpoint, validate_endpoint, outbound_slot
 from test_graphql_proxy import client, raw_response, upstream  # noqa: F401
 
 
@@ -113,6 +114,7 @@ async def test_rebinding_cannot_change_connected_ip_and_tls_keeps_hostname(monke
         return stream
     monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
     async with httpx.AsyncClient(transport=PinnedTransport(destination), trust_env=False) as client:
+        # An extension cannot override the TLS identity chosen by the transport.
         response = await client.post(str(destination.url), content=b'{"query":"{x}"}',
                                      extensions={"sni_hostname": "attacker.example"})
     assert response.json() == {"data": {}}

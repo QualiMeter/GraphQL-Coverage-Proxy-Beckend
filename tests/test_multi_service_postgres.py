@@ -1,3 +1,4 @@
+"""Real PostgreSQL and HTTPX: concurrent routing, ACL, migrations and row locks."""
 import asyncio
 import os
 from pathlib import Path
@@ -9,13 +10,13 @@ import httpx
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import proxy
 from app.database import get_session, get_session_factory
 from app.main import app
 from app.models import GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField, SchemaSnapshot, SchemaType, TestRun as Run
-from app.services import ConflictError, create_run, create_service, finish_run, import_sdl, update_service
+from app.services import ConflictError, create_run, create_service, import_sdl, update_service
 from app.upstream import PinnedTransport
 from test_graphql_proxy import TEST_ADMIN_KEY, raw_response
 from test_browser_auth_postgres import auth_context, login, grant  # noqa: F401
@@ -145,6 +146,7 @@ async def test_endpoint_update_checks_all_snapshots_then_preserves_history(route
         assert await session.get(SchemaSnapshot, uuid.UUID(snapshot["id"])) is not None
         assert await session.get(SchemaSnapshot, uuid.UUID(other_snapshot["id"])) is not None
         assert (await session.get(Run, uuid.UUID(run["id"]))).status == "completed"
+    # Public visibility never reveals configuration anonymously.
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://graphql.rebyte.fun") as anonymous:
         detail = await anonymous.get(route)
         assert detail.status_code == 200 and detail.json()["endpointUrl"] is None
@@ -183,6 +185,8 @@ async def test_run_creation_and_endpoint_edit_serialize_on_service_row(isolated_
     async with factory() as session:
         service = await create_service(session, "race", "Race", endpoint_url="https://93.184.216.34/graphql")
         snapshot = await import_sdl(session, service.id, "type Query { x: Int }")
+    # Deliberately hold a transaction across the competing operation. Each
+    # participant uses a separate PostgreSQL connection, not a shared mock.
     async with factory() as owner, factory() as competitor:
         await owner.scalar(select(GraphQLService).where(GraphQLService.id == service.id).with_for_update())
         if first == "run":

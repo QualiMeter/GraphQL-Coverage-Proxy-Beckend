@@ -1,12 +1,12 @@
 # Контракт для фронтенда — GraphQL Coverage API v0.1
 
-Статус: контракт ветки разработки, этапы 1–3 ТЗ v2.0 — cookie-сессии,
-роли, ACL, безопасный multi-service proxy и service introspection; изменения ещё не выложены на production. Базовые DTO покрытия,
-операций и статистики сохранены. **Новые endpoints, DTO SessionOut/UserOut,
-права, CSRF, ошибки и порядок интеграции:** [frontend-auth.md](frontend-auth.md).
-Контракт multi-service: [frontend-multi-service.md](frontend-multi-service.md).
-Introspection и коды ошибок этапа 3: [frontend-introspection.md](frontend-introspection.md).
-План и оставшиеся P0/P1: [v2-implementation-plan.md](v2-implementation-plan.md).
+Контракт текущего кода репозитория; состояние развёрнутой версии проверяется
+отдельно. [Авторизация и ACL](frontend-auth.md),
+[сервисы и маршрутизация](frontend-multi-service.md),
+[introspection и коды ошибок](frontend-introspection.md),
+[история и журнал](frontend-history-requests.md),
+[статистика, безопасный AST и schema metadata](frontend-final-features.md),
+[GraphQL error details](graphql-error-details.md). Полные DTO — в `/openapi.json`.
 
 ## 1. Настройки подключения
 
@@ -87,10 +87,9 @@ Browser session использует HttpOnly cookie и CSRF, см. [контр�
 анонимно; приватного — с grant либо admin/CLI key. Отзыв публикации/grant
 закрывает следующие чтения, включая исторические прогоны.
 
-Фильтры `/requests`, request detail и история serviceId реализованы в этапе 4.
-Этап 5 добавляет analysisStatusCounts/P95, SDL, displayName, schema metadata и
-безопасный AST реального обращения. [Полный frontend delta](frontend-final-features.md).
-P2 не реализован.
+Фильтры и detail описаны в [контракте журнала](frontend-history-requests.md).
+P95, SDL, displayName, schema metadata и безопасный AST — в
+[расширенных DTO](frontend-final-features.md). Сравнения прогонов/P50/P99 не реализованы.
 
 ## 3. Создать сервис
 
@@ -122,8 +121,8 @@ P2 не реализован.
 }
 ```
 
-`GET /api/services` без ключа возвращает массив **только опубликованных**
-сервисов. С корректным административным ключом — все сервисы.
+`GET /api/services` анонимно возвращает опубликованные сервисы; с сессией —
+также выданные по grant; admin/CLI видит все сервисы.
 
 `GET /api/services/{serviceId}` возвращает тот же DTO с проверкой ACL.
 `endpointUrl` доступен только admin/CLI или operator с grant; остальным — null.
@@ -172,8 +171,8 @@ P2 не реализован.
 Повторный hash возвращает тот же snapshot; совпавший SDL-снимок обогащается
 source/introspection metadata без изменения IDs полей, runs и observations.
 
-`GET /api/schemas?serviceId={uuid}` возвращает массив снимков, если сервис
-опубликован (либо запрос выполнен администратором).
+`GET /api/schemas?serviceId={uuid}` возвращает снимки опубликованного сервиса
+либо сервиса с grant; admin/CLI видит любой. Неизвестный/недоступный service — 404.
 
 ## 5. Карта GraphQL-схемы
 
@@ -214,7 +213,8 @@ source/introspection metadata без изменения IDs полей, runs и 
 }
 ```
 
-`POST /api/runs/{runId}/finish` — с административным ключом, без тела; ответ содержит
+`POST /api/runs/{runId}/finish` — operator с grant/admin и cookie+CSRF либо CLI key,
+без тела; ответ содержит
 тот же объект со `status="completed"` и заполненным `finishedAt`.
 Повторное завершение возвращает `409`.
 
@@ -226,13 +226,14 @@ source/introspection metadata без изменения IDs полей, runs и 
 Без limit возвращаются **все** совпадения, сохраняя старый snapshotId-клиент.
 Ответ RunOut[] и `X-Total-Count` до pagination; порядок startedAt DESC/id DESC.
 metadata — только admin/CLI, остальным `{}`. Недоступная история — 404 без total.
-[Полный контракт этапа 4, DTO и примеры](frontend-history-requests.md).
+[Полный контракт истории, DTO и примеры](frontend-history-requests.md).
 
 ## 7. Покрытие, поля и связи для карты
 
 `GET /api/runs/{runId}/coverage`
 
-Пример для схемы из раздела 4 после успешного обращения
+Пример основных полей графа (дополнительные schema metadata опущены)
+для схемы из раздела 4 после успешного обращения
 `query { users { id name } }`:
 
 ```json
@@ -320,7 +321,8 @@ metadata — только admin/CLI, остальным `{}`. Недоступн
 - `types[].name` — название узла.
 - `types[].kind` — вид GraphQL-типа.
 - `types[].fields` — поля в узле.
-- `relations[]` — рёбра между типами (идентификатор ребра: тип + поле).
+- `relations[]` — рёбра между типами; `id` — UUIDv5 от snapshot и координат ребра
+  ([точная формула](frontend-final-features.md)).
 - `covered` — был ли выбран элемент в учтённом запросе.
 - `hits` — число запросов, затронувших поле (повтор поля в одном запросе не увеличивает hits).
 - `coveragePercent` — готовое значение сервера, не пересчитывать во фронтенде.
@@ -357,7 +359,9 @@ Raw query, variables, cookies и response bodies не сохраняются.
 AST-копия реально пересланного документа, литералы/defaults маскируются;
 исторические записи — unavailable/null. Доступ только по journal ACL.
 [Состояния и лимиты](frontend-final-features.md). Фиктивный query не восстанавливается.
-[Подробности, валидация и примеры detail](frontend-history-requests.md).
+[Подробности журнала](frontend-history-requests.md). Дополнительные
+`graphqlErrorCount`, `graphqlErrorDetailsAvailability`, `graphqlErrorDetails`
+описаны в [контракте ошибок upstream](graphql-error-details.md); они есть только в detail.
 
 Пример списка:
 
@@ -366,6 +370,7 @@ AST-копия реально пересланного документа, ли�
   {
     "id": "6d950251-5469-42fb-b148-d03f0a840f55",
     "runId": "57b03e76-29a9-4d9c-a961-1d47ba4f850f",
+    "operationKey": "0f030140faafe545b46f3bd611c137d045e2588d0e0f7ea4af7daa40ec127849",
     "operationName": "GetUsers",
     "operationType": "query",
     "httpMethod": "POST",
@@ -651,27 +656,3 @@ export async function getPublicServices() {
 `Authorization`; первый связывает операцию с активным E2E-прогоном.
 Не отправляйте `X-Coverage-Api-Key` в браузере, даже если Swagger позволяет
 вручную авторизоваться: секрет доступен владельцам серверного окружения.
-
-
-## Этап 5: оставшиеся функциональные P0/P1
-
-[Полный контракт, примеры, DTO и порядок интеграции](frontend-final-features.md).
-
-- RunStats дополнен `analysisStatusCounts` (пять camelCase категорий, сумма =
-  totalRequests) и `p95DurationMs` (PostgreSQL percentile_cont(0.95), NULL исключены).
-- `GET /api/schemas/{schemaId}/sdl` → `{schemaId, schemaHash, sdl}` по schema ACL.
-- `PATCH /api/schemas/{schemaId}` → SchemaOut; только displayName, null очищает,
-  operator + grant либо admin/CLI; cookie write требует CSRF. SchemaOut всех
-  import/list дополнен nullable displayName. Hash/SDL/ID/покрытие неизменны.
-- GraphField: description/deprecationReason/args[] с name/type/description и
-  masked defaultValue/defaultValueAvailability. GraphType: description,
-  rootOperations[], interfaces[], possibleTypes[]. CoverageGraph: rootTypes.
-  GraphRelation: стабильный UUIDv5 id от snapshot и координат поля.
-- RequestDetailOut дополнен `safeGraphqlDocument: string | null` и
-  `documentAvailability: available | redacted | unavailable`; отсутствует в
-  списке обращений и публичных агрегатах. Никаких raw queries/variables/tokens.
-
-Для старых клиентов поля только добавляются; label опционален, P95 без durations
-равен null, исторический документ недоступен. На независимую проверку этапа 6
-остаются весь P0/P1 checklist, реальная frontend-интеграция и подготовка rollout.
-P2 (сравнения/P50/P99/дополнительные distributions/timeline) не добавлен.

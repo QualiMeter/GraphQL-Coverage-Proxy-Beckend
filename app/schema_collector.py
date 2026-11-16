@@ -1,3 +1,4 @@
+"""Service introspection through the shared pinned, bounded outbound transport."""
 from __future__ import annotations
 
 import asyncio
@@ -141,7 +142,7 @@ def _build_schema(payload: Any) -> CollectedSchema:
         raise InvalidIntrospectionResponseError("GraphQL response does not contain data.__schema")
     schema_data = data["__schema"]
     # Bound CPU/stack/ORM work as well as wire bytes. Walk iteratively before
-    # recursive graphql-core normalization.
+    # recursive graphql-core normalization. These are limits, not fake schemas.
     stack = [(schema_data, 0)]
     nodes = 0
     while stack:

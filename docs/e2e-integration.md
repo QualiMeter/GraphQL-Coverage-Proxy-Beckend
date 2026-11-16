@@ -1,23 +1,10 @@
 # Интеграция внешних E2E-тестов с GraphQL Coverage Proxy
 
-> Этапы 2–3 v2.0: endpoint хранится отдельно для каждого сервиса; run ID определяет
-> upstream через snapshot. Introspection импортирует схему выбранного Service.
-> [Пример двух сервисов](multi-service-e2e.md), [контракт introspection](frontend-introspection.md).
-> Browser использует cookie/CSRF, CLI — серверный API key. Browser cookies и
-> внутренние заголовки не уходят upstream. Безопасный AST — последующий этап P1.
-
-
-Документ для разработчиков бэкенда, тестов и фронтенда карты покрытия.
-Источники контракта: [app/contracts.py](../app/contracts.py),
-[REST API для фронтенда](frontend-api.md), [app/api_models.py](../app/api_models.py)
-и [app/services.py](../app/services.py).
-
-Обновлено 14 ноября 2026 года. Реализован путь
+Инструкция для внешнего E2E-набора. Контракт текущей реализации:
 `POST /graphql → capture_e2e_exchange() → record_observation() → PostgreSQL`.
-Он включается заголовком `X-Coverage-Run-Id`; реальный AST Analyzer подключён
-при создании FastAPI-приложения через `app.analyzer_adapter`. Синхронный
-`analyze_query()` выполняется в worker thread на схеме снимка прогона.
-Без заголовка разрешён только доверенный CLI в явном legacy-режиме; browser всегда требует run ID.
+Run ID выбирает snapshot и endpoint сервиса; browser использует session/CSRF,
+CLI — серверный API key. [Пример двух сервисов](multi-service-e2e.md),
+[REST API](frontend-api.md), [авторизация](frontend-auth.md).
 
 ## 1. Создание, выполнение и завершение test_run
 
@@ -99,7 +86,7 @@ X-Coverage-Run-Id: 57b03e76-29a9-4d9c-a961-1d47ba4f850f
 
 | Ситуация | HTTP | Запрос upstream |
 | --- | --- | --- |
-| Заголовка нет | Исходный ответ upstream | Да, без обращения к БД |
+| Заголовка нет | 400; только доверенный CLI при явном legacy-режиме получает исходный ответ | Только в legacy CLI, без coverage |
 | Некорректный/пустой/неоднозначный UUID | 400 | Нет |
 | Анализатор не подключён | 503 | Нет |
 | Прогон или его snapshot не найден | 404 | Нет |
@@ -170,8 +157,9 @@ CLI/E2E без Origin и Sec-Fetch-*; browser context блокирует их ц
 признаки ответа. Распаковка ограничена во время выполнения, а не после выделения
 неограниченного буфера. Предел касается анализа: исходные HTTP-тела, как и раньше,
 целиком буферизуются для прозрачной передачи.
-Не сохраняются текст операции, variables, `Authorization` и cookies;
-в наблюдение может попасть только SHA-256 текста операции (`query_hash`).
+Raw query, runtime variables, `Authorization` и cookies не сохраняются.
+Допустимы SHA-256 текста (`query_hash`), [masked AST](frontend-final-features.md)
+и [очищенные error metadata](graphql-error-details.md) в защищённом detail.
 
 ## 5. Proxy → GraphQL Analyzer → record_observation()
 
@@ -231,7 +219,7 @@ fallback-результаты покрытия отсутствуют. Ошиб�
 | `FieldReference` | `type_name: str`, `field_name: str` |
 | `GraphQLQueryInput` | `query: str`, `operation_name: str \| None = None`, `variables: dict = {}` через default factory |
 | `AnalysisResult` | `status: str`, `operation_type: str \| None`, `operation_name: str \| None`, `fields: tuple[FieldReference, ...] = ()`, `error_code: str \| None`; необязательные значения по умолчанию `None` |
-| `RequestObservationInput` | `run_id: UUID`, `analysis: AnalysisResult`, `http_method: str`, `http_status: int \| None`, `response_has_data: bool \| None`, `graphql_has_errors: bool \| None`, `duration_ms: int \| None = None`, `query_hash: str \| None = None` |
+| `RequestObservationInput` | `run_id: UUID`, `analysis: AnalysisResult`, `http_method: str`, `http_status: int \| None`, `response_has_data: bool \| None`, `graphql_has_errors: bool \| None`, `duration_ms: int \| None = None`, `query_hash: str \| None = None`, `safe_document: SafeDocument`, `graphql_errors: ErrorSummary` (default factories) |
 
 Сервис принимает статусы анализа `success`, `parse_error`, `validation_error`,
 `unsupported`, `internal_error`. Неуспешный анализ обязан иметь пустой `fields`;
@@ -245,75 +233,15 @@ fallback-результаты покрытия отсутствуют. Ошиб�
 возникает `NotFoundError`, для завершённого — `ConflictError`. Предварительная
 проверка отображает их в 404/409; после выполнения upstream применяется 502 выше.
 
-## 6. Какие поля считаются покрытыми
+## 6. Покрытие и чтение результатов
 
-Текущий `get_graph()` учитывает привязку поля к наблюдению только при двух условиях:
-`analysis_status == "success"` и `response_has_data is True`.
+Формула покрытия, OBJECT denominator, hits и DTO графа/аналитики описаны в
+[REST-контракте](frontend-api.md). Журнал, pagination и request detail — в
+[контракте истории](frontend-history-requests.md). Его чтение требует analyst/operator
+с grant либо admin/CLI даже для публичного сервиса. AST и GraphQL error details
+доступны только в защищённом detail; список обращений их не содержит.
 
-- `response_has_data=True` означает, что значение `data` — объект JSON.
-  `{"data":null}` теперь даёт `False` и не увеличивает покрытие. Пустой объект
-  `data` даёт `True`; это не проверка каждого вложенного значения ответа.
-  При невозможности проверить ответ сохраняется SQL `NULL`.
-- `graphql_has_errors=True` не исключает запрос с `data` из покрытия.
-  В текущем агрегаторе нет дополнительного фильтра по HTTP-статусу.
-  Ошибка транспорта без GraphQL-ответа с `data` не должна получать этот признак.
-- Поле идентифицируется парой «тип схемы + имя поля», например `User.id`.
-  Alias не создаёт отдельное поле покрытия. Повторы поля внутри одного наблюдения
-  дедуплицируются; повторные HTTP-запросы увеличивают `hits`, но не число уникально
-  покрытых полей. Встроенной дедупликации повторной записи всего запроса нет.
-- `covered` означает `hits > 0`. Покрытие отражает выбранные поля операции,
-  а не доказательство выполнения каждого resolver или наличия ненулевого значения.
-  Отсутствующие в операции поля ответа не считаются покрытыми автоматически.
-- AST Analyzer учитывает `operationName`, aliases и применимые `@skip`/`@include`
-  с variables. Fragments, subscriptions и нестандартные директивы пока возвращают
-  `unsupported` без полей. Для interface/union действуют ограничения MVP;
-  нельзя автоматически считать покрытыми все реализации интерфейса.
-- `__typename`, introspection-типы/поля и поля input-типов не импортируются как
-  учитываемые выходные поля. Аргументы и значения variables не являются полями
-  покрытия. Deprecated-поля остаются в схеме и учитываются.
-
-Например, для схемы из `frontend-api.md` запрос `query { users { id name } }`
-выбирает `Query.users`, `User.id`, `User.name`: 3 из 5 полей, 60%.
-Повтор запроса оставляет 60%, увеличивая hits этих полей до 2.
-Для получения этого результата нужен активный runId и GraphQL-ответ с объектом `data`.
-
-Общая `summary` учитывает поля только `OBJECT`. Интерфейсы остаются в графе,
-но не входят в общий знаменатель; это уже реализовано до данной интеграции.
-
-## 7. REST API для карты покрытия и диагностики
-
-| Запрос | Назначение |
-| --- | --- |
-| `GET /api/schemas/{schemaId}/graph` | Карта снимка до тестов: `runId=null`, `covered=false`, `hits=0` |
-| `GET /api/runs/{runId}/coverage` | Карта и метрики конкретного прогона, во время выполнения и после завершения |
-| `GET /api/runs/{runId}/requests?limit=100&offset=0` | Журнал запросов от новых к старым; `limit` от 1 до 500, `offset >= 0` |
-
-Форма `CoverageGraph` одинакова для карты схемы и прогона:
-
-| Путь в ответе | Как использовать во фронтенде |
-| --- | --- |
-| `schemaId`, `runId` | Привязка карты к снимку и прогону |
-| `summary.totalFields`, `coveredFields`, `coveragePercent` | Общие счётчики и готовый процент сервера |
-| `types[].name`, `kind` | Узлы; граф содержит OBJECT, INTERFACE, UNION |
-| `types[].totalFields`, `coveredFields`, `coveragePercent` | Метрики узла; процент `null`, если у типа нет полей |
-| `types[].fields[]` | `name`, `returnType`, `targetType`, `deprecated`, `covered`, `hits` |
-| `relations[]` | `fromType`, `field`, `toType`, `covered`; ключ ребра — исходный тип + поле |
-
-Поля `coveredFields` и `coveragePercent` в строке `summary` находятся внутри
-`summary`, аналогичные поля типов — внутри каждого элемента `types`.
-Связь покрыта, если покрыто соответствующее исходное поле. Для scalar-поля
-`targetType=null`, отдельного ребра нет. Общий процент пустой схемы — `0.0`;
-`null` у типа без полей не нужно отображать как 0%.
-
-Фронтенд использует серверные проценты. Журнал помогает отличить отсутствие
-трафика от `parse_error`, `validation_error`, `unsupported`, `internal_error`
-и ответов без `data`. Запись содержит `operationName`, `operationType`,
-`httpMethod`, `httpStatus`, `analysisStatus`, `responseHasData`, `graphqlHasErrors`,
-`durationMs`, `errorCode`, UUID и время; тел запросов/ответов в REST-журнале нет.
-Нулевое покрытие само по себе не доказывает, что приложение не использовало поля:
-проверяйте подключение анализатора и статусы журнала, а также признаки ответа.
-
-## 8. Минимальное подключение существующего Playwright-набора
+## 7. Минимальное подключение существующего Playwright-набора
 
 Это выдержки для внешнего E2E-репозитория, не новый Playwright-проект или тест.
 Предварительно нужны подключённый настоящий анализатор (раздел 5), реальный SDL,
@@ -376,10 +304,12 @@ set -euo pipefail
 : "${COVERAGE_API_URL:?REST API base URL is required}"
 : "${COVERAGE_SNAPSHOT_ID:?Imported snapshot UUID is required}"
 : "${COVERAGE_GRAPHQL_URL:?Proxy GraphQL URL is required}"
+: "${COVERAGE_API_KEY:?Server-side Coverage API key is required}"
 
 payload=$(jq -n --arg snapshotId "$COVERAGE_SNAPSHOT_ID" \
   '{snapshotId: $snapshotId, name: "External E2E", metadata: {}}')
 run=$(curl --fail-with-body --silent --show-error \
+  -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
   -H 'Content-Type: application/json' --data "$payload" \
   "$COVERAGE_API_URL/api/runs")
 COVERAGE_RUN_ID=$(jq -er '.id' <<< "$run")
@@ -389,8 +319,10 @@ finish_and_report() {
   test_status=$?
   trap - EXIT
   curl --fail-with-body --silent --show-error -X POST \
+    -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
     "$COVERAGE_API_URL/api/runs/$COVERAGE_RUN_ID/finish" || exit 1
   curl --fail-with-body --silent --show-error \
+    -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
     "$COVERAGE_API_URL/api/runs/$COVERAGE_RUN_ID/coverage" || exit 1
   exit "$test_status"
 }
@@ -411,49 +343,21 @@ Playwright сохраняется, а ошибка завершения/полу
 EXIT trap не спасает от SIGKILL или потери runner: незавершённый run потребует
 явного `/finish` оператором. Удалять или переиспользовать чужой running-прогон нельзя.
 
-## 9. Необходимые компоненты демонстрационного приложения
+## 8. Ограничения и диагностика
 
-| Компонент | Что необходимо для реального демо |
-| --- | --- |
-| GraphQL upstream | Работающий сервер с настоящими resolvers, данными и авторизацией; доступен из прокси |
-| Тестируемое веб-приложение | Существующие пользовательские сценарии, которые действительно вызывают GraphQL; GraphQL URL настраивается на прокси |
-| HTTP Proxy | `/graphql`, настроенный upstream, прозрачная пересылка, извлечение runId и запись наблюдений |
-| GraphQL Analyzer | Разбор/валидация операции по снимку схемы и выдача `AnalysisResult` с `FieldReference` |
-| PostgreSQL и Coverage REST API | Импорт реального SDL, создание/завершение run, сохранение и агрегация наблюдений |
-| Внешний E2E-набор | Настоящие тесты, авторизация приложения, общий runId и управление жизненным циклом |
-| Фронтенд карты | Выбор сервиса/снимка/прогона, узлы и связи из REST API, статусы покрытия и журнал |
-| Подключение окружения | Доступность адресов, CORS/origin и корректная передача заголовков на всех промежуточных узлах |
+Нужны настоящий upstream, приложение с GraphQL URL на proxy, PostgreSQL и
+внешний набор с авторизацией Coverage. Прямые SSR/BFF-запросы к upstream
+обходят наблюдение; их клиент тоже должен использовать proxy и run ID.
 
-До/после запуска можно сравнить карту схемы и карту прогона, проверить реальный
-результат пользовательского действия и рост hits при повторном запросе.
-Заранее заполненные наблюдения, ручные field IDs или подмена GraphQL-ответов
-не доказывают работу этой интеграции.
+Поддержан HTTP POST с буферизацией: request 1 MiB, response 8 MiB,
+анализ декодированной копии 1 MiB, upstream exchange 30 с, до 16 слотов/worker.
+WebSocket, streaming, batching и persisted query без текста не анализируются.
+Fragments/subscriptions и нестандартные directives дают unsupported без полей.
+[SSRF, DNS pinning и ограничения](multi-service-security.md).
 
-## 10. Оставшиеся зависимости и ограничения
-
-HTTP Proxy, Schema Collector (SDL и introspection), AST Analyzer, запись наблюдений
-и метрика по OBJECT объединены в приложении без изменения моделей или REST DTO.
-Автоматический интеграционный тест с PostgreSQL проверяет реальный Analyzer до
-`/coverage`. Перед публичным развёртыванием остаются следующие проверки:
-
-1. Прогнать внешний E2E-набор с реальным upstream и проверить `/requests` и рост
-   `coveredFields`/`hits` через `/coverage`.
-2. Определить поддержку fragments, interface/union и частичных GraphQL-ответов.
-3. Ограничить публичный доступ к REST API и `X-Coverage-Run-Id`.
-
-Прокси поддерживает только HTTP POST, буферизует HTTP-тела, не поддерживает
-WebSocket-подписки и streaming, не следует redirects; таймаут каждой сетевой
-операции — 30 секунд. Batching, persisted queries без текста и multipart не
-анализируются. Произвольные/составные Content-Encoding не распаковываются для
-анализа, но исходный ответ передаётся без изменения при успешной записи.
-
-REST API сейчас без авторизации; **runId не является механизмом авторизации**.
-Интеграция не разрешает публично открывать административный API. Окружение должно
-оставаться ограниченным тестовым. Nginx, VPS и deploy workflow здесь не меняются.
-`/health` подтверждает ответ процесса, но не готовность БД, upstream или анализатора.
-Сопоставления с конкретным тест-кейсом, автоматического закрытия зависших прогонов
-и REST-статуса «тесты упали» нет.
-
-`GET /api/schemas?serviceId={uuid}` и `GET /api/runs?snapshotId={uuid}`
-для неизвестного родителя возвращают 200 и пустой массив; чтение карты или
-завершение неизвестного прогона возвращает 404. Это существующее поведение REST API.
+Сначала проверьте настоящий пользовательский результат и строки журнала,
+затем coverage/hits. Заполненные вручную наблюдения не доказывают интеграцию.
+`/health` проверяет процесс; `/api/services` дополнительно проверяет БД.
+Неизвестный или недоступный родитель в списках схем/прогонов даёт 404.
+Run ID не заменяет авторизацию. Автоматического закрытия зависших runs,
+связи с test case и REST-операции установки failed нет.

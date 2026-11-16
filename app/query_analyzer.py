@@ -1,3 +1,5 @@
+"""Analyze GraphQL operations against a schema without persisting request data."""
+
 from __future__ import annotations
 
 from graphql import (
@@ -145,6 +147,7 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
 
 
 def _has_unsupported_selection(operation: OperationDefinitionNode) -> bool:
+    """Reject selections whose executed fields cannot be determined safely."""
     if _has_unsupported_directive(operation.directives or ()):
         return True
 

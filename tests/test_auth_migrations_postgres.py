@@ -1,3 +1,5 @@
+"""Exercise Alembic upgrade/downgrade with historical rows in an isolated DB."""
+
 import asyncio
 import os
 from pathlib import Path
@@ -43,12 +45,13 @@ async def test_auth_migration_preserves_existing_services_snapshots_runs_and_obs
 
         async def history():
             async with engine.connect() as connection:
-                return [await connection.scalar(text(f"SELECT jsonb_agg(to_jsonb(t) - 'endpoint_url' - 'description' - 'updated_at' - 'operation_key' - 'display_name' - 'safe_graphql_document' - 'document_availability') FROM {table} t"))
+                return [await connection.scalar(text(f"SELECT jsonb_agg(to_jsonb(t) - 'endpoint_url' - 'description' - 'updated_at' - 'operation_key' - 'display_name' - 'safe_graphql_document' - 'document_availability' - 'graphql_error_count' - 'graphql_error_details_availability' - 'graphql_error_details') FROM {table} t"))
                         for table in ("graphql_services", "schema_snapshots", "test_runs", "observed_requests")]
         before = await history()
         await migrate("upgrade", "head")
         assert await history() == before
         async with engine.connect() as connection:
+            # The historical row lacks identity; the new cache must stay null.
             assert await connection.scalar(text("SELECT operation_key FROM observed_requests WHERE id=:id"),
                                            {"id": observation}) is None
         async with engine.connect() as connection:

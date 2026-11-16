@@ -1,3 +1,5 @@
+"""Schema, run and observation storage shared by HTTP routes and the proxy."""
+
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -295,6 +297,7 @@ async def import_introspection_schema(
     async with sessions() as session:
         async with session.begin():
             # Lock, reauthorize and compare the endpoint in the write transaction.
+            # Keep all schema/type/field flushes protected by the existing savepoint.
             result = await _save_parsed_schema(
                 session, service_id, collected.parsed, source="introspection",
                 introspection_json=collected.introspection_json, expected_endpoint=endpoint,
@@ -379,10 +382,10 @@ async def finish_run(session: AsyncSession, run_id: uuid.UUID, *, include_metada
 
 
 async def record_observation(session: AsyncSession, observation: RequestObservationInput) -> uuid.UUID:
-    """Record an observation against the running snapshot.
+    """Atomically store an observation and fields verified against its run snapshot.
 
-    The proxy must supply truthful upstream metadata. Cross-snapshot field
-    references are rejected atomically. A failed analysis may have no fields.
+    The caller supplies truthful upstream metadata; unsuccessful analyses cannot
+    claim fields. The run lock serializes recording with finish_run().
     """
     run = await session.scalar(
         select(TestRun).where(TestRun.id == observation.run_id).with_for_update()
@@ -429,6 +432,9 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
         analysis_status=analysis.status,
         response_has_data=observation.response_has_data,
         graphql_has_errors=observation.graphql_has_errors,
+        graphql_error_count=observation.graphql_errors.count,
+        graphql_error_details_availability=observation.graphql_errors.availability,
+        graphql_error_details=observation.graphql_errors.details,
         duration_ms=observation.duration_ms,
         error_code=analysis.error_code,
     )

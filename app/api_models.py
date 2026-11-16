@@ -1,3 +1,5 @@
+"""JSON contracts. Public API always serializes attributes as camelCase."""
+
 import uuid
 from datetime import datetime
 from typing import Any, Literal
@@ -6,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 from app.contracts import OperationType
+from app.graphql_errors import ErrorDetailsAvailability
 from app.safe_document import DocumentAvailability
 
 
@@ -196,7 +199,22 @@ class SelectedFieldOut(ApiModel):
     return_type: str | None
 
 
+class GraphQLErrorLocationOut(ApiModel):
+    line: int = Field(ge=1, le=1_000_000)
+    column: int = Field(ge=1, le=1_000_000)
+
+
+class GraphQLErrorDetailOut(ApiModel):
+    code: str | None = Field(default=None, max_length=64)
+    path: list[str | int] | None = Field(default=None, max_length=16)
+    locations: list[GraphQLErrorLocationOut] = Field(default_factory=list, max_length=8)
+    safe_message: str | None = Field(default=None, max_length=128)
+
+
 class RequestDetailOut(RequestOut):
+    graphql_error_count: int | None = Field(default=None, ge=0, description="Actual number of upstream error objects, before truncation; null if unknown.")
+    graphql_error_details_availability: ErrorDetailsAvailability = "unavailable"
+    graphql_error_details: list[GraphQLErrorDetailOut] | None = Field(default=None, max_length=20)
     safe_graphql_document: str | None = Field(default=None, description="Normalized AST of the actual wire document, literals masked; never an executable replay or selectedFields reconstruction.")
     document_availability: DocumentAvailability = "unavailable"
 

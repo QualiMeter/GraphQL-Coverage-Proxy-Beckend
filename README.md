@@ -1,334 +1,168 @@
-# GraphQL Coverage Backend — REST API / GraphQL Proxy v0.1
+# GraphQL Coverage Backend
 
-Бэкенд GraphQL Coverage: PostgreSQL, REST API для публичного каталога
-и администрирования, HTTP-прокси GraphQL и анализ покрытия по E2E-наблюдениям.
+FastAPI backend для измерения покрытия GraphQL-схемы по реальному E2E-трафику.
+HTTP-прокси направляет запросы в выбранный сервис, анализирует операции по
+снимку его схемы и сохраняет наблюдения в PostgreSQL.
 
-**Production:** [Swagger](https://graphql.rebyte.fun/docs) ·
-[OpenAPI](https://graphql.rebyte.fun/openapi.json) ·
-публичный API: `https://graphql.rebyte.fun/api/...`.
+## Возможности
 
-**Frontend:** [работающий интерфейс](https://graphql.rebyte.fun/coverage/) ·
-[репозиторий React/Vite](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-Frontend).
-Статическая сборка публикуется на VPS отдельным GitHub Actions workflow при
-успешном CI на `main`; Nginx отдаёт её с того же HTTPS origin, что и API.
-React читает с сервера каталог сервисов, снимки, граф схемы и SDL. Покрытие конкретного прогона доступно через REST.
+- Несколько сервисов с отдельными endpoint, импорт SDL и introspection,
+  неизменяемые снимки схем, названия снимков и выгрузка SDL.
+- Прогоны, история и журнал с фильтрами, покрытие полей, агрегаты операций,
+  среднее время, P95 и временная шкала.
+- Browser-сессии, роли viewer/analyst/operator/admin, grants и CSRF;
+  отдельный административный ключ для доверенных CLI/CI.
+- Защищённый request detail: выбранные поля, AST с маскированием литералов
+  и ограниченные очищенные сведения об upstream GraphQL-ошибках.
+- Swagger `/docs`, OpenAPI `/openapi.json`, `/health` для проверки процесса.
 
-[Контракт авторизации и bootstrap](docs/frontend-auth.md) ·
-[план следующих P0/P1](docs/v2-implementation-plan.md).
-CLI/E2E сохраняет серверный API key, браузер использует cookie+CSRF.
+Поддерживаются HTTP POST и анализ query/mutation. Fragments, subscriptions и
+нестандартные execution directives не дают покрытия; batching, WebSocket и
+потоковая доставка не поддерживаются. Привязки обращения к E2E test case нет.
 
-## Реализованные функции
+## Архитектура
 
-Бэкенд измеряет использование полей на трафике конкретного прогона. Сначала сервис получает снимок схемы. Тест создаёт прогон на этом снимке и передаёт его ID в `POST /graphql`. После ответа upstream бэкенд записывает наблюдение. По одному `runId` можно получить и общую долю покрытия, и обращения, из которых она сложилась.
+`Service → SchemaSnapshot → TestRun → POST /graphql → upstream → observation → coverage`.
+Заголовок `X-Coverage-Run-Id` определяет снимок и `service.endpointUrl`.
+На одном снимке допускается один активный прогон; завершать его следует после
+ожидания всех запросов. Смена endpoint запрещена при активном прогоне сервиса.
 
-| Возможность | Что получает клиент | Где реализовано | Где проверяется |
-| --- | --- | --- | --- |
-| Каталог и адреса сервисов | Регистрация GraphQL endpoint, публичность и выбор upstream по сервису прогона | [Маршруты REST](app/api.py), [операции с сервисами](app/services.py) | [Маршрутизация двух сервисов](tests/test_multi_service_postgres.py) |
-| Вход и права | Серверная cookie-сессия, роли viewer/analyst/operator/admin, выдача и отзыв доступа к сервису, защита изменений через Origin и CSRF. Для CI предусмотрен API-ключ | [API пользователей и сессий](app/auth_api.py), [проверка прав](app/access.py), [bootstrap первого администратора](app/auth_cli.py) | [Сессии и права на PostgreSQL](tests/test_browser_auth_postgres.py) |
-| Импорт и версии схем | Снимок из SDL или introspection, идентификатор и хеш, повторное использование одинакового снимка в рамках сервиса | [Загрузка схемы](app/schema_collector.py), [разбор SDL](app/schema_parser.py), [сохранение](app/services.py) | [Импорт из работающего upstream](tests/test_service_introspection_postgres.py) |
-| Исследование снимка | SDL, граф типов и связей, аргументы полей, признаки deprecated, корневые типы и отображаемое имя снимка | [Метаданные](app/schema_metadata.py), [форматы ответов](app/api_models.py) | [Метаданные и доступ к документу](tests/test_final_features_postgres.py) |
-| Прогоны и история | Создание, завершение, история по снимку или сервису. Один снимок допускает один активный прогон. Данные завершённых прогонов остаются в PostgreSQL | [Жизненный цикл и хранилище](app/services.py), [миграции](alembic/versions/) | [История и права](tests/test_history_journal_postgres.py) |
-| HTTP-прокси | Маршрут от runId к endpoint, проверка назначения, передача разрешённых заголовков и исходного ответа upstream | [Обработчик /graphql](app/proxy.py), [исходящий транспорт](app/upstream.py) | [Прокси и запись наблюдения](tests/test_proxy_e2e_postgres.py), [cookie](tests/test_proxy_cookie_policy.py) |
-| Анализ GraphQL | Для query и mutation анализатор находит координаты выбранных полей с учётом вложенности, aliases, variables, `@skip` и `@include`. Ошибки разбора и валидации получают отдельные статусы | [AST-анализатор](app/query_analyzer.py), [обработка обмена](app/e2e_capture.py) | [Сценарии анализатора](tests/test_query_analyzer.py) |
-| Покрытие и аналитика | Уникальные покрытые поля, hits по координатам, группы операций, счётчики ошибок, средняя длительность и P95 | [Расчёт покрытия](app/services.py), [агрегаты прогонов](app/run_analytics.py) | [Покрытие на PostgreSQL](tests/test_postgres_integration.py), [статистика](tests/test_run_analytics_postgres.py) |
-| Журнал запросов | Фильтры и пагинация, выбранные поля отдельного обращения, признак учёта в покрытии и маскированное представление документа | [Журнал](app/journal.py), [маскирование литералов](app/safe_document.py) | [Проверки маскирования](tests/test_safe_document.py) |
-| Развёртывание | PostgreSQL 16 и Alembic в Compose, запуск Uvicorn за доверенным прокси, повтор неудавшегося деплоя | [Compose](compose.yaml), [сервер](app/server.py), [скрипт деплоя](deploy/vps/graphql-coverage-deploy.sh) | [Повторный деплой](tests/test_deploy_retries.py) |
+Прокси возвращает исходные статус и байты upstream после commit наблюдения.
+Запись и завершение сериализованы блокировкой run. Если запись после upstream
+не удалась, клиент получает безопасный 502: mutation уже могла выполниться,
+**автоматически повторять её нельзя**.
 
-**Границы анализа.** Fragments и subscriptions получают статус `unsupported`. Связь обращения с конкретным pytest-тестом ведёт QA-проект. Для браузерного клиента основным идентификатором серверной аналитики служит `runId`.
+Покрытие учитывает уникальные поля `OBJECT` при
+`analysis_status=success AND response_has_data=true`. `data` должен быть
+JSON-объектом; HTTP/GraphQL-ошибки при наличии data не отменяют учёт. Повтор поля
+в одном обращении не увеличивает hits, повторное обращение увеличивает.
 
-## Локальный запуск через Docker
+Основные модули: [API](app/api.py), [proxy](app/proxy.py),
+[анализатор](app/query_analyzer.py), [запись наблюдений](app/e2e_capture.py),
+[хранение и покрытие](app/services.py), [журнал](app/journal.py),
+[аналитика](app/run_analytics.py), [outbound policy](app/upstream.py).
 
-Нужен Docker с Compose:
+## Запуск
+
+Нужны Python 3.12+ и PostgreSQL 16 либо Docker с Compose.
 
 ```bash
+cp .env.example .env
+# При локальном HTTP login задайте в .env:
+# COVERAGE_DEV_MODE=true
+# COVERAGE_PUBLIC_ORIGIN=http://localhost:8000
+# Для Vite proxy используйте origin UI, например http://localhost:5173.
 docker compose up --build -d
+curl --fail-with-body http://localhost:8000/health
 ```
 
-Для проверки входа с локального React укажите в файле `.env` рядом с `compose.yaml` значения `COVERAGE_DEV_MODE=true` и `COVERAGE_PUBLIC_ORIGIN=http://localhost:5173`, затем выполните команду запуска. Для CLI задайте в том же окружении `COVERAGE_API_KEY`. Если backend запущен в контейнере, адрес upstream должен быть доступен из него. Для локального HTTP-upstream настройте точный origin через `COVERAGE_DEV_UPSTREAM_ORIGINS`.
+Dev Compose поднимает PostgreSQL на `127.0.0.1:5432`, применяет Alembic и
+публикует API на `127.0.0.1:8000`. Пароль в нём предназначен для разработки.
+Ожидаемый health response — `{"status":"ok"}`; доступ к БД проверяйте отдельно
+через `GET /api/services`.
 
-Compose поднимет PostgreSQL 16, применит миграцию Alembic и запустит FastAPI.
-
-- API: http://localhost:8000
-- Swagger: http://localhost:8000/docs
-- OpenAPI JSON: http://localhost:8000/openapi.json
-- PostgreSQL на хосте: 127.0.0.1:5432
-
-Учётные данные PostgreSQL в `compose.yaml` только для локальной разработки.
-Конфигурация production находится в `deploy/`.
-
-Для создания первого администратора в уже запущенном Compose выполните `docker compose exec api python -m app.auth_cli bootstrap-admin initialadmin`. Остановка через `docker compose down` сохраняет именованный том PostgreSQL.
-
-Проверка:
-
-```bash
-curl http://localhost:8000/health
-```
-
-Ожидаемый ответ: `{"status":"ok"}`.
-
-## Приватные и публичные сервисы
-
-Для доверенного CLI/CI задайте `COVERAGE_API_KEY` в окружении (минимум
-32 символа, рекомендуется `openssl rand -hex 32`). Браузер использует login/session
-и CSRF; API key для него не нужен. Первого администратора создаёт
-`python -m app.auth_cli bootstrap-admin initialadmin` после миграции.
-Пароль запрашивается через getpass. Открытой регистрации нет.
-
-- Новые и ранее созданные сервисы **приватны по умолчанию** (`isPublic=false`).
-  Администратор может опубликовать сервис через
-  `PATCH /api/services/{service_id}` с телом `{"isPublic":true}`.
-- `GET /api/services`, списки схем/прогонов и графы покрытия без ключа доступны
-  только для опубликованных сервисов. Авторизованные видят также сервисы с grant.
-  Приватные UUID без разрешения дают `404`.
-- Произвольное поле `metadata` тестового прогона скрыто при публичном чтении
-  (`{}`); журнал `GET /api/runs/{run_id}/requests` доступен analyst/operator с grant
-  либо admin/CLI. Произвольное metadata выдаётся только admin/CLI.
-- Создание сервисов, импорт схем, запуск и завершение прогонов, управление
-  видимостью и `POST /graphql` требуют operator/admin session+CSRF и grant
-  либо доверенный `X-Coverage-Api-Key`.
-  Административный ключ никогда не пересылается на upstream; собственный
-  клиентский `Authorization` по-прежнему передаётся прозрачно.
-- Секретный ключ допустим только на сервере или в защищённой CI-среде,
-  не в React/Vite-приложении.
-
-Публичный REST API доступен на `https://graphql.rebyte.fun` без префикса
-`/coverage`. В production фронтенд обращается к API относительными путями
-(`fetch('/api/services')`): CORS между ними не нужен, поскольку origin общий.
-Локально Vite проксирует `/api` на сервер API.
-Контракт, примеры ответов и ограничения для frontend:
-[docs/frontend-api.md](docs/frontend-api.md).
-
-## Запуск без Docker для API (PostgreSQL нужен отдельно)
+Без Docker для API, с отдельно запущенной PostgreSQL:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[test]'
-cp .env.example .env
-```
-
-Переменные из `.env` нужно экспортировать в окружение (файл не загружается автоматически):
-
-```bash
+python -m pip install -e '.[test]'
 export DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage
-export CORS_ORIGINS=http://localhost:5173
+export COVERAGE_DEV_MODE=true
+export COVERAGE_PUBLIC_ORIGIN=http://localhost:8000
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-## Интеграция E2E-наблюдений
+При запуске Python напрямую `.env` автоматически не загружается: экспортируйте
+нужные переменные. После миграций создайте первого администратора интерактивно:
+`python -m app.auth_cli bootstrap-admin initialadmin` (в Docker —
+`docker compose exec api python -m app.auth_cli bootstrap-admin initialadmin`).
+Пароль вводится через getpass. Самостоятельной регистрации нет.
 
-Внутренний модуль `app.e2e_capture` связывает один GraphQL HTTP-обмен
-с существующим `running`-прогоном и его snapshot схемы:
-`capture_e2e_exchange(session, run_id=..., request_body=...,
-decoded_response_body=..., http_status=..., duration_ms=..., analyzer=...)`.
+## Конфигурация
 
-- `analyzer` обязателен: это асинхронная функция, принимающая
-  `(GraphQLQueryInput, schema_sdl)` и возвращающая настоящий `AnalysisResult`.
-- Поддерживается одиночный JSON GraphQL-запрос, включая `operationName` и
-  `variables`. Неподдерживаемая форма сохраняется как `unsupported` без покрытия.
-- В PostgreSQL сохраняются только метаданные, хеш текста операции, статусы
-  анализа, ссылки на поля и только masked AST copy. Исходные query, variables
-  и ответы не сохраняются. Безопасная копия реально выполненного document выдаётся в защищённом request detail.
-- Признаки GraphQL-ответа вычисляются по **декодированной копии JSON**.
-  Для анализа gzip/deflate распаковываются с пределом 1 МиБ, непроверяемый ответ
-  даёт `None`. Клиент получает исходные сжатые байты ответа; в БД они не сохраняются.
-- При падении анализатора записывается `internal_error`, без фиктивного покрытия.
+Примеры: [.env.example](.env.example), [deploy/.env.example](deploy/.env.example).
 
-`POST /graphql` вызывает этот модуль при наличии `X-Coverage-Run-Id` и ждёт commit
-перед отправкой исходного ответа. При запуске `app.state.coverage_analyzer`
-получает настоящий `app.analyzer_adapter.analyze_e2e_query`: он компилирует SDL
-снимка и выполняет синхронный `analyze_query()` в worker thread. Схемы кешируются
-с ограничением 32 снимка. CLI proxy без заголовка работает без БД только в явном legacy-режиме.
-Некорректный/неоднозначный UUID даёт 400, неизвестный прогон — 404,
-завершённый — 409. Сервис без endpoint даёт 409, если legacy fallback явно не включён.
+| Переменная | Назначение |
+|---|---|
+| `DATABASE_URL` | PostgreSQL DSN с драйвером `postgresql+asyncpg` |
+| `COVERAGE_API_KEY` | CLI/CI admin key: минимум 32 ASCII-символа; хранить только на сервере |
+| `COVERAGE_PUBLIC_ORIGIN` | Точный browser origin без пути и завершающего `/`; default `https://graphql.rebyte.fun` |
+| `COVERAGE_DEV_MODE` | Явное разрешение HTTP browser login и dev upstream policy; default false |
+| `COVERAGE_DEV_UPSTREAM_ORIGINS` | Точные origins через запятую; действуют только вместе с dev mode |
+| `CORS_ORIGINS` | Отдельные разрешённые origins; default пусто, cookie CORS выключен |
+| `COVERAGE_LEGACY_PROXY` | Временный CLI passthrough без run ID и fallback для старых NULL endpoint; default false |
+| `TARGET_GRAPHQL_URL` | Адрес только для явно включённого legacy-режима |
+| `FORWARDED_ALLOW_IPS` | Для `app.server`: обязательные точные IP непосредственного reverse proxy peer |
+| `API_ROOT_PATH` | Префикс, удаляемый reverse proxy; на отдельном origin — пустое значение |
+| `TEST_DATABASE_URL` | Только выделенная тестовая БД; тестовый пользователь должен иметь CREATEDB |
 
-Если запись после upstream не удалась, ответ — 502 с предупреждением, что upstream
-уже мог выполнить запрос. Автоматически повторять mutation нельзя.
-Проверка cookie session и preflight run/snapshot/service освобождают соединения
-PostgreSQL до DNS, чтения тела и upstream HTTP. После ответа наблюдение сохраняется
-в новой транзакции с прежней блокировкой run относительно `finish`.
-Полные имена GraphQL-операций сохраняются как `TEXT` и точно фильтруются в журнале,
-включая имена длиннее 255 символов. Требуется миграция
-`20261119_operation_name_text`; [проверки и ограничение downgrade](docs/stage6-audit-report.md).
-Подробный контракт, порядок подключения и оставшиеся зависимости:
-[docs/e2e-integration.md](docs/e2e-integration.md).
+Production Compose фиксирует dev mode=false и требует точный proxy peer после
+Docker NAT. Дополнительные `POSTGRES_*`/`API_PORT` описаны в
+[deployment-инструкции](deploy/README.md).
 
-## HTTP-прокси GraphQL
+## Тестирование
 
-Создайте отдельный сервис с обязательным `endpointUrl`, импортируйте схему через introspection или SDL и
-создайте run. Прокси выбирает адрес через `X-Coverage-Run-Id → TestRun →
-SchemaSnapshot → GraphQLService.endpoint_url`. Переключать глобальное окружение
-при переключении сервисов не требуется. [Контракт frontend](docs/frontend-multi-service.md)
-и [готовый пример двух сервисов](docs/multi-service-e2e.md).
+`DATABASE_URL` и `TEST_DATABASE_URL` должны указывать на разные выделенные
+локальные БД. Integration fixtures создают дополнительные временные БД;
+использовать production запрещено.
 
 ```bash
-curl http://localhost:8000/graphql \
-  -H 'Content-Type: application/json' \
-  -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
-  -H "X-Coverage-Run-Id: $RUN_ID" \
-  --data-binary '{"query":"query Health { health }"}'
-```
-
-Сохраняются исходные байты тела, разрешённые заголовки, статус и тело ответа.
-Browser Cookie/Set-Cookie, внутренние X-Coverage-*, CSRF, forwarding и hop-by-hop
-headers не пересылаются. Только доверенный CLI без Origin/Sec-Fetch-* может
-явно передать upstream cookies; общего cookie jar нет.
-
-HTTPS:443 обязателен по умолчанию. URL без credentials/query/fragment проверяется
-при сохранении и перед соединением. Все DNS-ответы должны быть безопасны;
-сокет закреплён за проверенным числовым IP, TLS проверяет исходный hostname.
-`POST /api/services` и `PATCH /api/services/{id}` освобождают соединения БД
-до DNS. Перед записью повторно проверяются cookie session, роль и grant;
-PATCH делает это под блокировкой сервиса и повторно проверяет активные runs.
-Redirects, environment proxies и автоматические retries выключены.
-Лимиты: request 1 МиБ, response 8 МиБ, анализ decoded response 1 МиБ,
-DNS 3 с, чтение входящего тела 10 с, upstream обмен 30 с, 16 обменов на worker.
-HTTP/локальные адреса требуют одновременно COVERAGE_DEV_MODE=true и точный
-COVERAGE_DEV_UPSTREAM_ORIGINS. Production Compose dev-режим запрещает.
-[Архитектура и ограничения SSRF](docs/multi-service-security.md).
-
-Временная совместимость: COVERAGE_LEGACY_PROXY=true разрешает доверенному
-CLI без run ID использовать TARGET_GRAPHQL_URL, а старым сервисам с NULL
-endpoint — fallback к нему. Новый configured-сервис всегда использует свой URL.
-Browser всегда требует run ID. Legacy по умолчанию выключен.
-
-Смена endpoint при любом running run сервиса возвращает 409. После завершения
-всех runs endpoint можно изменить, snapshots/наблюдения сохраняются.
-502/504 после отправки могут означать уже выполненную mutation: автоматический
-повтор запрещён. Только HTTP POST; WebSocket и потоковая доставка не поддержаны.
-
-## Импорт схемы через introspection
-
-`POST /api/schemas/import/introspection` принимает только `{"serviceId":"<UUID>"}`,
-находит сохранённый endpointUrl сервиса и выполняет стандартный introspection query.
-Настроенные сервисы всегда используют свой адрес, независимо от глобального target.
-Operator требует grant, admin может импортировать любой сервис. Browser использует
-cookie+Origin+CSRF; URL, credentials и произвольные headers в JSON не принимаются.
-Входящие cookies/CSRF/API key/Authorization не передаются upstream.
-
-```bash
-curl --fail-with-body -sS http://localhost:8000/api/schemas/import/introspection \
-  -H "X-Coverage-Api-Key: $COVERAGE_API_KEY" \
-  -H 'Content-Type: application/json' -d '{"serviceId":"<service UUID>"}'
-```
-
-Ответ 201 — существующий SchemaOut. Дедупликация serviceId + schemaHash сохраняет
-snapshot ID; SDL-снимок с тем же hash обогащается source/introspection metadata
-без изменения исторических полей/runs/observations. Конкурентные SDL/introspection
-импорты сериализованы service lock, все flush защищены savepoint; миграция не нужна.
-Смена endpoint во время fetch возвращает 409 без сохранения старой схемы.
-
-Сохраняются SSRF/DNS pinning, TLS verification, запреты redirects/retries/proxies,
-лимиты 8 МиБ / 15 с на fetch и общий с proxy лимит 16 jobs/worker. Нормализация
-в worker thread имеет отдельные пределы размера/сложности. Поддержан identity encoding.
-Ошибки содержат безопасный строковый detail и стабильный code; отключённая
-introspection — 409 INTROSPECTION_DISABLED с предложением ручного SDL.
-Закрытые API с upstream-аутентификацией пока требуют SDL: токены не хранятся.
-Legacy fallback для NULL endpoint — только explicit COVERAGE_LEGACY_PROXY=true.
-[Frontend-контракт и таблица ошибок](docs/frontend-introspection.md),
-[архитектура/ограничения](docs/service-introspection.md).
-
-## Обращение фронтенда
-
-Подробный контракт: [docs/frontend-api.md](docs/frontend-api.md).
-Договорённость: JSON-имена — camelCase, идентификаторы — UUID, время — ISO 8601 UTC.
-
-Порядок работы серверного администратора/CI (изменяющие методы требуют
-`X-Coverage-Api-Key`):
-
-1. `POST /api/services` — создаём запись сервиса.
-2. `POST /api/schemas/import` — импортируем SDL, получаем `schemaId` (в ответе `id`).
-3. `GET /api/schemas/{schemaId}/graph` — карта ещё без данных о прогонах.
-4. `POST /api/runs` — запускаем прогон.
-5. Отправьте запрос к upstream через `POST /graphql` с заголовком `X-Coverage-Run-Id`. Прокси запишет наблюдение после ответа upstream.
-6. `GET /api/runs/{runId}/coverage` — получаем реальные поля, связи и покрытие.
-7. `POST /api/runs/{runId}/finish` — закрываем прогон.
-
-## Аналитика операций и прогонов
-
-REST API предоставляет агрегаты существующих наблюдений без сохранения
-исходных GraphQL-документов, переменных и токенов:
-
-- `GET /api/runs/{runId}/operations` — группировка по `query_hash`, имени
-  и типу, включая безымянные операции; счётчики, ошибки, время и поля
-  `fields: [{typeName, fieldName, hits}]`. `hits` считает только учтённые
-  обращения с `analysis_status=success AND response_has_data=true`, как
-  Coverage Engine и `countedRequestCount`; повтор поля в обращении считается
-  один раз. Из трёх успешных анализов с двумя ответами с объектом `data`
-  получаем `hits=2`. Поля без учтённых обращений не включаются в `fields`.
-  `requestCount` на уровне операции сохраняет общее число обращений группы.
-  Необязательные фильтры: `operationName` (точное имя) и `operationType`.
-- `GET /api/runs/{runId}/stats` — все обращения, уникальные операции,
-  независимые HTTP/GraphQL-ошибки, покрытие существующего Coverage Engine и
-  непустые интервалы по одной минуте в UTC. Неизвестные длительности
-  исключены из среднего; без измерений возвращается `null`.
-
-Для опубликованных сервисов (`isPublic=true`) агрегаты доступны без ключа;
-для приватных проверка идёт через прогон → снимок → сервис (анонимно — `404`).
-Точные DTO, примеры и семантика — в [контракте фронтенда](docs/frontend-api.md#81-операции-прогона)
-и FastAPI OpenAPI. Завершённые прогоны используют собственные исторические данные.
-Детальный журнал, `POST /graphql` и изменяющие методы
-требуют авторизации с соответствующими ролью и grant. Пользователей создаёт admin,
-самостоятельной регистрации нет. Не передавайте `COVERAGE_API_KEY` в браузер.
-История по сервису, фильтры журнала и request detail реализованы в этапе 4;
-[frontend-контракт, total/pagination/ACL и миграция](docs/frontend-history-requests.md).
-Этап 5 добавляет P95/analysisStatusCounts, masked AST реального документа,
-SDL и метаданные схемы, displayName. [Контракт frontend](docs/frontend-final-features.md),
-[миграция и будущий release](deploy/STAGE5-RELEASE.md).
-Для сравнения двух сохранённых прогонов используйте модуль diff в [QA-проекте](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-QA).
-
-## Тесты
-
-```bash
-pip install -e '.[test]'
-pytest -q
-```
-
-Основной CI использует Linux, Python 3.12 и PostgreSQL 16. Набор включает тесты Bash-скриптов развёртывания. Для интеграционных тестов задайте отдельную БД в `TEST_DATABASE_URL`, примените к ней миграции и предоставьте тестовой роли CREATEDB для сценариев с временными базами:
-
-```bash
-export TEST_DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage_test
-DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
-pytest -q -m integration
-```
-
-Используйте только выделенную тестовую БД. Если переменная не задана,
-интеграционный тест пропускается (это не считается доказательством работы БД).
-
-## Внутренние контракты
-
-- Общие типы: `app/contracts.py`.
-- GraphQL Analyzer возвращает `AnalysisResult` со списком `FieldReference`.
-- Proxy вызывает `capture_e2e_exchange()` после ответа upstream для запросов
-  с runId; реальный Analyzer подключён через `app.analyzer_adapter`.
-- Хеш запроса — SHA-256 текста GraphQL; не хранить переменные, авторизацию и cookies.
-- `response_has_data=True` означает, что GraphQL-ответ содержит объект `data`, а не `null`;
-  только такие успешно проанализированные запросы идут в процент покрытия.
-- GraphQL ошибки могут сосуществовать с `data`; процент отражает выбранные поля,
-  а не успешность выполнения каждого вложенного resolver.
-
-Изменения в `contracts.py` согласовываются между разработчиками.
-
-## Проверка авторизации и миграций
-
-```bash
-export DATABASE_URL=postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage_test
-export TEST_DATABASE_URL="$DATABASE_URL"
+python -m pip install -e '.[test]'
 alembic upgrade head
-pytest -q tests/test_browser_auth.py tests/test_browser_auth_postgres.py tests/test_auth_migrations_postgres.py
-python -m app.auth_cli cleanup
+DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
+python -m pytest -m "not integration" -q
+python -m pytest -m integration -q
+python -m pip check
+python -m compileall -q app
+alembic check
+git diff --check
 ```
 
-Только отдельная тестовая БД. Migration-тест создаёт/удаляет временную БД на том же
-тестовом сервере и требует CREATEDB. PostgreSQL проверяет upgrade/downgrade с
-историческими записями, роли, grants, cookie/CSRF, отзыв сессий, throttling и proxy.
-Для HTTP разработки явно задать COVERAGE_DEV_MODE=true и точный
-COVERAGE_PUBLIC_ORIGIN; production — HTTPS и доверенные reverse proxy headers.
-Подробные настройки, эксплуатационные ограничения и DTO — [frontend-auth.md](docs/frontend-auth.md).
+Без `TEST_DATABASE_URL` integration-тесты пропускаются; такой запуск не
+подтверждает PostgreSQL. [Backend CI](.github/workflows/backend-ci.yml)
+использует PostgreSQL 16 и дополнительно запускает
+`python tests/docker_auth_smoke.py` — изолированный Nginx TLS → Docker → Uvicorn
+smoke. Для него нужен Linux Docker daemon.
 
-Перед merge при существующем автодеплое: [порядок безопасного выпуска PR #23](deploy/PR23-RELEASE.md).
-Production требует точный FORWARDED_ALLOW_IPS после Docker NAT и использует
-`python -m app.server`; wildcard/сети запрещены. Тест полного локального Docker-стенда:
-`python tests/docker_auth_smoke.py` (Linux Docker daemon, отдельный project, тестовый TLS).
-CI выполняет его после полного pytest; VPS при этом не используется.
+## Deployment
+
+[Ручной запуск и конфигурация VPS](deploy/README.md) ·
+[GitHub Actions и root-owned скрипт](deploy/AUTODEPLOY.md).
+Образ собирается из [Dockerfile](Dockerfile), production-конфигурация —
+[deploy/compose.production.yaml](deploy/compose.production.yaml).
+
+PR запускает проверки. Push/workflow_dispatch на `main` после успешного CI
+может запустить deploy при `ENABLE_PRODUCTION_DEPLOY=true`. Изменения в PR
+сами по себе не подтверждают состояние production. Выпуск, pending migrations,
+backup и применимость исторических release notes согласуются оператором отдельно.
+
+## Безопасность
+
+Сервисы приватны по умолчанию. Публичность открывает агрегаты, а журнал/detail
+требует analyst/operator с grant либо admin/CLI. Приватные UUID без доступа
+дают 404. Browser использует same-origin HttpOnly cookie и Origin/CSRF;
+административный ключ в frontend не передаётся. API-ответы имеют `no-store`.
+
+Upstream по умолчанию — HTTPS:443. URL и все DNS-ответы проверяются перед
+соединением, сокет закрепляется за проверенным IP, TLS проверяет исходный
+hostname. Redirects, environment proxies и retries отключены. Browser cookies,
+CSRF и внутренние coverage headers upstream не получает. Лимиты proxy:
+request 1 MiB, response 8 MiB, decoded analysis 1 MiB, обмен 30 с, 16 слотов/worker.
+
+Raw query, runtime variables, секретные headers и response bodies не хранятся.
+Разрешены masked AST и allowlisted error metadata только в защищённом detail.
+Сохранённый SDL — отдельные данные схемы и может содержать author defaults;
+публичность снимка следует выбирать с учётом его содержимого.
+
+## Контракты и инструкции
+
+[Указатель всей документации](docs/README.md) ·
+[REST API](docs/frontend-api.md) · [Авторизация](docs/frontend-auth.md) ·
+[Сервисы](docs/frontend-multi-service.md) ·
+[Introspection](docs/frontend-introspection.md) ·
+[История и журнал](docs/frontend-history-requests.md) ·
+[Статистика, AST и schema metadata](docs/frontend-final-features.md) ·
+[GraphQL error details](docs/graphql-error-details.md) ·
+[E2E-интеграция](docs/e2e-integration.md).

@@ -5,8 +5,7 @@ from app import diagnostics
 
 
 def drain_diagnostics():
-    # Test-only bounded wait: inspect records only after real background emission.
-    # No production flush/join or request-path waiting is introduced.
+    # Await background emission only in tests, never on the production request path.
     pending = getattr(diagnostics, '_pending', None)
     if pending is not None:
         with pending.all_tasks_done:
@@ -26,7 +25,7 @@ class _DiagnosticCapture:
 @pytest.fixture
 def caplog(caplog):
     # The production logger deliberately does not propagate to root handlers.
-    # Attach pytest's normal capture explicitly; retain every original assertion.
+    # Attach pytest's capture directly to the isolated logger.
     isolated = not diagnostics.logger.propagate
     if isolated:
         diagnostics.logger.addHandler(caplog.handler)

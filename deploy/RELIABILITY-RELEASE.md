@@ -1,5 +1,9 @@
 # Production Pre-Deployment Checklist
 
+> Процедура конкретного исторического выпуска. Сохранена для миграций, rollback
+> и безопасности; её SHA, состояние autodeploy и предварительные условия нужно
+> подтвердить отдельно. Общая конфигурация — [README.md](README.md).
+
 Эта инструкция предназначена **оператору после независимого ревью PR**. Агент
 не выполнял SSH, установку, merge или deployment. `ENABLE_PRODUCTION_DEPLOY`
 остаётся включённым; Secrets, Variables и workflow не меняются.
