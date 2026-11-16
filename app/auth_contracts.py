@@ -1,5 +1,3 @@
-"""Frontend authentication contracts; secrets are input-only."""
-
 import uuid
 from datetime import datetime
 from typing import Literal

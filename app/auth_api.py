@@ -1,5 +1,3 @@
-"""Same-origin browser authentication and administrator-only account/ACL management."""
-
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone

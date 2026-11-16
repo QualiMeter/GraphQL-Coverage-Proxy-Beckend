@@ -1,4 +1,3 @@
-"""Deterministic scheduling assertions, without latency/benchmark thresholds."""
 import asyncio
 import threading
 import uuid
@@ -39,8 +38,6 @@ async def test_sdl_import_runs_parser_off_loop_and_services_other_coroutines(mon
     task = asyncio.create_task(services.import_sdl(session, uuid.uuid4(), large_sdl()))
     started_wait = asyncio.create_task(started.wait())
     try:
-        # The thread must wait until THIS coroutine runs; a timeout alone is not
-        # the success criterion. The thread identity assertion catches baseline.
         done, _ = await asyncio.wait([task, started_wait],
                                      timeout=10, return_when=asyncio.FIRST_COMPLETED)
         if task in done:
@@ -82,8 +79,6 @@ async def test_cancelled_running_work_retains_capacity_until_thread_finishes():
     tasks = [asyncio.create_task(schema_work(work, i)) for i in range(12)]
     try:
         await asyncio.wait_for(full.wait(), 10)
-        # Cancel running and queued requests, then submit more. Cancelled worker
-        # threads must still consume their slots; queued requests must not start.
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

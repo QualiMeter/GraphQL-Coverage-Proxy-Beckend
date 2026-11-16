@@ -1,5 +1,3 @@
-"""Credential boundaries and OpenAPI, without PostgreSQL or invented users."""
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -72,7 +70,6 @@ def test_anonymous_session_and_protected_auth_endpoints(monkeypatch):
         assert response.headers["cache-control"] == "no-store"
         assert client.get("/api/auth/users").status_code == 401
         assert client.post("/api/auth/users", json={}).status_code == 401
-        # No public bootstrap, registration or admin signup route.
         assert client.post("/api/auth/bootstrap", json={}).status_code == 404
         assert client.post("/api/auth/register", json={}).status_code == 404
 

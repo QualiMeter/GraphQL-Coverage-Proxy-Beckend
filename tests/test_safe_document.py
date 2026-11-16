@@ -1,5 +1,3 @@
-"""Literal values never survive normalization, at any position in the real AST."""
-
 import pytest
 from graphql import parse, print_ast
 from graphql.language import Visitor, visit
@@ -51,7 +49,6 @@ def test_real_document_structure_names_fragments_directives_defaults_are_preserv
     assert '[REDACTED]' in safe.text and 'REDACTED' in safe.text
     assert '0.0' in safe.text and 'false' in safe.text
     assert '$input' in safe.text and 'alias: account' in safe.text
-    # A printed copy can be reparsed, without pretending placeholders validate/execute.
     assert print_ast(parse(safe.text)) == safe.text
     assert normalize_document(safe.text).text == safe.text
 

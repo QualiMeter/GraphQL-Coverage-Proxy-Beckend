@@ -1,5 +1,3 @@
-"""Bound credential payloads and prevent shared/browser caching of API data."""
-
 from starlette.responses import JSONResponse
 
 

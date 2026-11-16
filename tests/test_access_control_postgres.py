@@ -1,5 +1,3 @@
-"""Visibility is enforced for nested schema, run and coverage IDs in PostgreSQL."""
-
 import uuid
 
 import httpx
@@ -43,14 +41,12 @@ async def test_private_is_default_and_nested_reads_cannot_bypass_visibility(
         ) as client:
             admin_headers = {"X-Coverage-Api-Key": TEST_KEY}
 
-            # All pre-existing and newly created services remain private by default.
             assert private.is_public is False
             assert published.is_public is False
             assert (await client.get("/api/services")).json() == []
             admin_list = await client.get("/api/services", headers=admin_headers)
             assert {row["id"] for row in admin_list.json()} == {str(private.id), str(published.id)}
 
-            # Unauthorized publishing cannot alter visibility.
             response = await client.patch(
                 f"/api/services/{published.id}", json={"isPublic": True}
             )
@@ -82,12 +78,10 @@ async def test_private_is_default_and_nested_reads_cannot_bypass_visibility(
             )
             assert admin_runs.json()[0]["metadata"] == {"internalToken": "must-not-be-public"}
 
-            # Even request metadata for a publicly visible run is admin-only.
             journal = f"/api/runs/{public_run.id}/requests"
             assert (await client.get(journal)).status_code == 401
             assert (await client.get(journal, headers=admin_headers)).status_code == 200
 
-            # Revoke publication without deleting schemas or run history.
             response = await client.patch(
                 f"/api/services/{published.id}", json={"isPublic": False}, headers=admin_headers
             )

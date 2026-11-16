@@ -1,5 +1,3 @@
-"""Real DB checks for the E2E exchange adapter (no fake coverage in production)."""
-
 import hashlib
 import os
 import uuid
@@ -96,7 +94,6 @@ async def test_capture_persists_real_run_observation_and_only_analyzed_fields(po
     graph = await get_run_graph(session, run.id)
     assert (graph.summary.total_fields, graph.summary.covered_fields) == (3, 2)
 
-    # Unsupported request shapes must never be assigned fake covered fields.
     async def never_analyze(*_args):
         pytest.fail("Unsupported request must not reach the AST analyzer")
 
@@ -117,7 +114,6 @@ async def test_capture_persists_real_run_observation_and_only_analyzed_fields(po
     graph = await get_run_graph(session, run.id)
     assert graph.summary.covered_fields == 2
 
-    # Broken analyzers get a stable error code, not fabricated fields or secrets.
     async def broken_analyzer(*_args):
         raise RuntimeError("private-value")
 

@@ -1,5 +1,3 @@
-"""Run locally against the intended DB: python -m app.auth_cli bootstrap-admin USERNAME."""
-
 import argparse
 import asyncio
 import getpass

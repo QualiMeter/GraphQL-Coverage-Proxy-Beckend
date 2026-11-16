@@ -1,5 +1,3 @@
-"""Explicit E2E credentials are distinct from ambient browser cookies."""
-
 import httpx
 import pytest
 

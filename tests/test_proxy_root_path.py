@@ -1,5 +1,3 @@
-"""Swagger/OpenAPI must use the external URL prefix behind Nginx."""
-
 from pathlib import Path
 
 import httpx

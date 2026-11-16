@@ -1,5 +1,3 @@
-"""Unit tests for AST-based GraphQL query analysis."""
-
 import pytest
 from graphql import build_schema
 

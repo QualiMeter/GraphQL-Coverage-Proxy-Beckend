@@ -1,4 +1,3 @@
-"""PostgreSQL persistence checks using owned read/write sessions for introspection."""
 import uuid
 
 import pytest
@@ -72,8 +71,6 @@ async def test_introspection_never_commits_or_rolls_back_caller_work(isolated_da
         return collected
     monkeypatch.setattr(services, "collect_schema", collect)
     async with sessions() as caller:
-        # Dirty persistent object, unflushed insert, and already-flushed work all
-        # belong to a different caller transaction and must remain untouched.
         existing = await caller.get(GraphQLService, service.id)
         flushed = GraphQLService(key="flushed", name="Pending flushed")
         caller.add(flushed)
@@ -92,7 +89,6 @@ async def test_introspection_never_commits_or_rolls_back_caller_work(isolated_da
             assert (await observer.get(GraphQLService, service.id)).description is None
             assert await observer.scalar(select(GraphQLService.id).where(GraphQLService.key.in_(["flushed", "pending"]))) is None
             assert await observer.scalar(select(func.count()).select_from(SchemaSnapshot)) == (0 if failure else 1)
-        # Caller explicitly decides to persist its work; introspection did not.
         await caller.commit()
     async with sessions() as observer:
         assert (await observer.get(GraphQLService, service.id)).description == "Uncommitted caller edit"

@@ -1,5 +1,3 @@
-"""Unit tests for Schema Collector using an in-memory HTTP transport."""
-
 import httpx
 import pytest
 from graphql import build_schema, get_introspection_query, graphql_sync
