@@ -4,9 +4,20 @@ from datetime import timezone
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api_models import AnalysisStatusCounts, OperationFieldOut, OperationOut, RequestTimelineBucket, RunStats
+from app.api_models import (
+    AnalysisStatusCounts,
+    OperationFieldOut,
+    OperationOut,
+    RequestTimelineBucket,
+    RunStats,
+)
 from app.models import ObservedRequest, RequestFieldUsage, SchemaField, SchemaType, TestRun
-from app.services import NotFoundError, coverage_summary, counted_observation, COVERAGE_KINDS
+from app.services import (
+    NotFoundError,
+    counted_observation,
+    COVERAGE_KINDS,
+    coverage_summary,
+)
 from app.operation_identity import operation_key
 
 

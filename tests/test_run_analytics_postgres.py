@@ -1,21 +1,30 @@
 import hashlib
+import os
 import uuid
 from datetime import datetime, timezone
 
 import httpx
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy import delete, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.contracts import AnalysisResult, FieldReference, RequestObservationInput
 from app.analyzer_adapter import analyze_e2e_query
 from app.database import get_session, get_session_factory
 from app.main import app
 from app.e2e_capture import capture_e2e_exchange
-from app.models import ObservedRequest
+from app.models import (
+    GraphQLService, ObservedRequest, SchemaField, SchemaSnapshot, SchemaType,
+    TestRun as RunModel,
+)
+from app.api_models import RunComparisonRequest
+from app.auth import Principal
+from app.run_comparison import RunComparisonError, compare_run_series
 from app.run_analytics import get_run_stats, list_operations, operation_key
 from app.services import (
-    NotFoundError, create_run, create_service, finish_run, get_run_graph, import_sdl, record_observation,
+    NotFoundError, create_run, create_service, finish_run, get_run_graph, import_sdl,
+    record_observation,
 )
 from test_e2e_capture_postgres import postgres_session  # noqa: F401
 
@@ -81,6 +90,177 @@ async def test_empty_run_and_unknown_duration(postgres_session, analytics_run, n
     assert operation.operation_name == name
     assert operation.request_count == operation.fields[0].hits == 2
     assert stats.coverage_percent == (await get_run_graph(session, run.id)).summary.coverage_percent
+
+
+async def test_three_run_comparison_matches_coverage_engine_and_classifies_field_history(postgres_session):
+    service = await create_service(postgres_session, "comparison-" + uuid.uuid4().hex,
+                                   "Comparison", is_public=True)
+    schema = await import_sdl(postgres_session, service.id,
+        "type Query { user: User health: String } type User { id: ID email: String } "
+        "type Mutation { createUser: User deleteUser: Boolean }")
+    series = []
+    for run_index, (name, field_hits) in enumerate((
+        ("First", {("Query", "user"): 2, ("User", "id"): 2, ("Mutation", "deleteUser"): 1}),
+        ("Second", {("Query", "user"): 3, ("User", "id"): 2, ("User", "email"): 1,
+                    ("Mutation", "createUser"): 2}),
+        ("Third", {("Query", "user"): 3, ("User", "id"): 2, ("Mutation", "createUser"): 2}),
+    )):
+        run = await create_run(postgres_session, schema.id, name, {})
+        for (type_name, field_name), count in field_hits.items():
+            for _ in range(count):
+                await observe(postgres_session, run.id, query_hash=(field_name + name).encode().hex()[:64].ljust(64, "0"),
+                              name=f"{name}_{field_name}", fields=((type_name, field_name),))
+        await finish_run(postgres_session, run.id)
+        await postgres_session.execute(
+            text("UPDATE test_runs SET started_at = :started WHERE id = :run_id"),
+            {"started": datetime(2026, 11, run_index + 1, tzinfo=timezone.utc), "run_id": run.id},
+        )
+        await postgres_session.commit()
+        series.append(run)
+
+    payload = RunComparisonRequest.model_validate({
+        "runIds": [str(run.id) for run in series], "baselineRunId": str(series[0].id),
+        "targetRunId": str(series[2].id),
+    })
+    comparison = await compare_run_series(postgres_session, payload, Principal(role="admin"))
+    assert comparison.snapshot_id == schema.id
+    assert [run.name for run in comparison.runs] == ["First", "Second", "Third"]
+    assert [(run.total_fields, run.covered_fields, run.coverage_percent) for run in comparison.runs] == [
+        (6, 3, 50.0), (6, 4, 66.67), (6, 3, 50.0),
+    ]
+    assert comparison.comparison.percentage_point_delta == 0
+    assert comparison.field_categories == {
+        "newlyCovered": 1, "noLongerCovered": 1, "stillCovered": 2, "stillUncovered": 2,
+        "alwaysCovered": 2, "neverCovered": 1, "intermittentlyCovered": 3,
+    }
+    assert [delta["deltaPp"] for delta in comparison.comparison.adjacent_coverage_deltas_pp] == [16.67, -16.67]
+    email = next(item for item in comparison.fields.items if (item.type_name, item.field_name) == ("User", "email"))
+    assert [item.hits for item in email.hits_by_run] == [0, 1, 0]
+    assert email.coverage_frequency_percent == 33.33 and email.coverage_transitions == 2
+    assert email.baseline_to_target == "stillUncovered" and email.stability == "intermittentlyCovered"
+    assert comparison.types.total == 3
+    assert {item.type_name: item.root_role for item in comparison.types.items} == {
+        "Mutation": "mutation", "Query": "query", "User": None,
+    }
+    for run, compared_run in zip(series, comparison.runs):
+        stats = await get_run_stats(postgres_session, run.id)
+        graph = await get_run_graph(postgres_session, run.id)
+        assert compared_run.covered_fields == stats.covered_fields == graph.summary.covered_fields
+        assert compared_run.total_requests == stats.total_requests
+        assert compared_run.counted_requests == stats.counted_requests
+
+    default_target = await compare_run_series(
+        postgres_session,
+        RunComparisonRequest.model_validate({
+            "runIds": [str(run.id) for run in series], "baselineRunId": str(series[0].id),
+            "fields": {"filter": "changed", "limit": 1},
+        }),
+        Principal(role="admin"),
+    )
+    assert default_target.target_run_id == series[2].id
+    assert default_target.fields.total == 2 and len(default_target.fields.items) == 1
+    assert default_target.field_categories == comparison.field_categories
+
+
+async def test_run_comparison_rejects_active_runs_and_different_snapshots(postgres_session, analytics_run):
+    _, schema, finished = analytics_run
+    await finish_run(postgres_session, finished.id)
+    active = await create_run(postgres_session, schema.id, "Active", {})
+    active_payload = RunComparisonRequest.model_validate({
+        "runIds": [str(finished.id), str(active.id)], "baselineRunId": str(finished.id),
+    })
+    with pytest.raises(RunComparisonError) as error:
+        await compare_run_series(postgres_session, active_payload, Principal(role="admin"))
+    assert error.value.code == "RUN_NOT_COMPLETED"
+    await finish_run(postgres_session, active.id)
+
+    other_schema = await import_sdl(
+        postgres_session,
+        (await create_service(
+            postgres_session, "other-schema-" + uuid.uuid4().hex, "Other schema"
+        )).id,
+        "type Query { different: Boolean }",
+    )
+    other_run = await create_run(postgres_session, other_schema.id, "Other", {})
+    await finish_run(postgres_session, other_run.id)
+    mismatch_payload = RunComparisonRequest.model_validate({
+        "runIds": [str(finished.id), str(other_run.id)], "baselineRunId": str(finished.id),
+    })
+    with pytest.raises(RunComparisonError) as error:
+        await compare_run_series(postgres_session, mismatch_payload, Principal(role="admin"))
+    assert error.value.code == "SNAPSHOT_MISMATCH"
+
+
+async def test_run_comparison_http_acl_and_response_omit_run_metadata():
+    test_url = os.environ.get("TEST_DATABASE_URL")
+    if not test_url:
+        pytest.skip("TEST_DATABASE_URL missing; PostgreSQL integration NOT verified")
+    configured_url = os.environ.get("DATABASE_URL", "postgresql+asyncpg://coverage:coverage_dev@localhost:5432/coverage")
+    if make_url(test_url).database == make_url(configured_url).database:
+        pytest.fail("TEST_DATABASE_URL must name a database separate from DATABASE_URL")
+    engine = create_async_engine(test_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    service_ids = []
+    snapshot_ids = []
+    run_ids = []
+    app.dependency_overrides[get_session_factory] = lambda: sessions
+    try:
+        async with sessions() as setup:
+            service = await create_service(setup, "comparison-http-" + uuid.uuid4().hex,
+                                          "Public comparison", is_public=True)
+            schema = await import_sdl(setup, service.id, "type Query { visible: Boolean }")
+            service_ids.append(service.id)
+            snapshot_ids.append(schema.id)
+            runs = []
+            for run_index, name in enumerate(("Before", "After")):
+                run = await create_run(setup, schema.id, name, {"private": "must not leak"})
+                run.started_at = datetime(2026, 11, 10 + run_index, tzinfo=timezone.utc)
+                await setup.commit()
+                await finish_run(setup, run.id)
+                runs.append(run)
+                run_ids.append(run.id)
+
+            private = await create_service(setup, "comparison-private-" + uuid.uuid4().hex,
+                                           "Private comparison")
+            private_schema = await import_sdl(setup, private.id,
+                                              "type Query { hidden: Boolean }")
+            service_ids.append(private.id)
+            snapshot_ids.append(private_schema.id)
+            hidden = []
+            for name in ("Hidden one", "Hidden two"):
+                run = await create_run(setup, private_schema.id, name, {})
+                await finish_run(setup, run.id)
+                hidden.append(run)
+                run_ids.append(run.id)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            body = {"runIds": [str(run.id) for run in runs], "baselineRunId": str(runs[0].id)}
+            response = await client.post("/api/runs/compare", json=body)
+            assert response.status_code == 200
+            data = response.json()
+            assert data["targetRunId"] == str(runs[1].id)
+            assert [run["name"] for run in data["runs"]] == ["Before", "After"]
+            assert all("metadata" not in run for run in data["runs"])
+
+            inaccessible = await client.post("/api/runs/compare", json={
+                "runIds": [str(runs[0].id), str(hidden[0].id)],
+                "baselineRunId": str(runs[0].id),
+            })
+            assert inaccessible.status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_session_factory, None)
+        async with sessions() as cleanup:
+            async with cleanup.begin():
+                if run_ids:
+                    await cleanup.execute(delete(RunModel).where(RunModel.id.in_(run_ids)))
+                if snapshot_ids:
+                    type_ids = select(SchemaType.id).where(SchemaType.snapshot_id.in_(snapshot_ids))
+                    await cleanup.execute(delete(SchemaField).where(SchemaField.type_id.in_(type_ids)))
+                    await cleanup.execute(delete(SchemaType).where(SchemaType.snapshot_id.in_(snapshot_ids)))
+                    await cleanup.execute(delete(SchemaSnapshot).where(SchemaSnapshot.id.in_(snapshot_ids)))
+                if service_ids:
+                    await cleanup.execute(delete(GraphQLService).where(GraphQLService.id.in_(service_ids)))
+        await engine.dispose()
 
 
 async def test_aggregates_group_identity_errors_fields_timeline_and_history(postgres_session, analytics_run):

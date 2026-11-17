@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import api
+from app.api_models import RunComparisonRequest
 from app.main import app
 from app.run_analytics import operation_key
 from app.services import NotFoundError
@@ -55,11 +56,41 @@ def test_visibility_is_checked_before_aggregating(endpoint, handler, monkeypatch
     aggregate.assert_not_awaited()
 
 
+def test_comparison_request_validates_run_selection_and_rejects_unknown_keys():
+    first, second = uuid.uuid4(), uuid.uuid4()
+    valid = {"runIds": [str(first), str(second)], "baselineRunId": str(first)}
+    request = RunComparisonRequest.model_validate(valid)
+    assert request.target_run_id is None
+    assert request.fields.filter == "all"
+    for invalid in (
+        {**valid, "runIds": [str(first), str(first)]},
+        {**valid, "baselineRunId": str(uuid.uuid4())},
+        {**valid, "targetRunId": str(first)},
+        {**valid, "targetRunId": str(uuid.uuid4())},
+        {**valid, "unexpected": True},
+        {**valid, "fields": {"filter": "unknown"}},
+        {**valid, "fields": {"limit": 201}},
+        {**valid, "types": {"offset": -1}},
+    ):
+        with pytest.raises(ValueError):
+            RunComparisonRequest.model_validate(invalid)
+    with pytest.raises(ValueError):
+        RunComparisonRequest.model_validate({**valid, "runIds": [str(first)]})
+
+
 def test_openapi_has_exact_analytics_dtos_and_public_access():
     schema = app.openapi()
     paths = schema["paths"]
+    comparison = paths["/api/runs/compare"]["post"]
     operations = paths["/api/runs/{run_id}/operations"]["get"]
     stats = paths["/api/runs/{run_id}/stats"]["get"]
+    assert "409" in comparison["responses"] and "404" in comparison["responses"]
+    assert comparison["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == (
+        "#/components/schemas/RunComparisonResponse"
+    )
+    assert comparison["requestBody"]["content"]["application/json"]["schema"]["$ref"] == (
+        "#/components/schemas/RunComparisonRequest"
+    )
     assert "security" not in operations and "security" not in stats
     assert "404" in operations["responses"] and "404" in stats["responses"]
     assert {item["name"] for item in operations["parameters"]} == {"run_id", "operationName", "operationType"}
