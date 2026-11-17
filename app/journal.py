@@ -56,6 +56,7 @@ class RunFilters(DateRange):
 
 
 class RequestFilters(DateRange):
+    test_execution_id: uuid.UUID | None = None
     operation_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", description="Exact lowercase SHA-256 identity returned by /operations.")
     operation_name: str | None = Field(default=None, description="Exact full case-sensitive name; omission includes unnamed operations.")
     operation_type: OperationType | None = None
@@ -105,6 +106,7 @@ async def list_run_page(session: AsyncSession, filters: RunFilters, *, include_m
 
 def request_out(row: ObservedRequest) -> RequestOut:
     return RequestOut(
+        test_execution_id=getattr(row, "test_execution_id", None),
         id=row.id, run_id=row.run_id, operation_key=row.operation_key,
         operation_name=row.operation_name, operation_type=row.operation_type,
         http_method=row.http_method, http_status=row.http_status,
@@ -119,7 +121,7 @@ async def list_request_page(session: AsyncSession, run_id: uuid.UUID, filters: R
     if run is None:
         raise NotFoundError("Test run not found")
     conditions = [ObservedRequest.run_id == run_id]
-    for name in ("operation_key", "operation_name", "operation_type", "analysis_status", "graphql_has_errors", "http_status"):
+    for name in ("test_execution_id", "operation_key", "operation_name", "operation_type", "analysis_status", "graphql_has_errors", "http_status"):
         value = getattr(filters, name)
         if value is not None:
             conditions.append(getattr(ObservedRequest, name) == value)

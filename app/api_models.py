@@ -178,6 +178,7 @@ class CoverageGraph(ApiModel):
 
 
 class RequestOut(ApiModel):
+    test_execution_id: uuid.UUID | None = None
     operation_key: str | None = Field(default=None, description="Existing operation identity; null when hash or operation type is unknown.")
     id: uuid.UUID
     run_id: uuid.UUID

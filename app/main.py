@@ -15,6 +15,7 @@ from app.config import cors_origins
 from app.database import SessionFactory, engine
 from app.proxy import router as proxy_router
 from app.gitlab_api import router as gitlab_router
+from app.test_coverage_api import router as test_coverage_router
 from app.gitlab_config import gitlab_enabled, gitlab_settings
 from app.gitlab_runs import monitor
 
@@ -43,6 +44,7 @@ app.include_router(router)
 app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(gitlab_router)
+app.include_router(test_coverage_router)
 
 
 @app.get("/health", tags=["System"])
@@ -55,7 +57,8 @@ async def safe_validation_error(request: Request, exc: RequestValidationError):
     if (route_path(request.scope).startswith("/api/auth/")
             or route_path(request.scope).startswith("/api/services")
             or route_path(request.scope).startswith("/api/schemas")
-            or route_path(request.scope) == "/api/runs/gitlab"):
+            or route_path(request.scope) == "/api/runs/gitlab"
+            or (route_path(request.scope).startswith("/api/runs/") and "/tests" in route_path(request.scope))):
         # Pydantic's default error input can echo a submitted password or body.
         return JSONResponse(status_code=422, content={"detail": [
             {key: error[key] for key in ("type", "loc", "msg")} for error in exc.errors()

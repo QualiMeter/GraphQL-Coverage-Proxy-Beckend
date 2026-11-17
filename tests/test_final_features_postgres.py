@@ -310,7 +310,8 @@ async def test_historical_migration_and_safe_document_constraints(isolated_datab
     async with isolated_database() as session:
         after=(await session.execute(text('SELECT to_jsonb(t) FROM observed_requests t'))).scalar()
         assert {k:v for k,v in after.items() if k not in ('safe_graphql_document','document_availability',
-            'graphql_error_count','graphql_error_details','graphql_error_details_availability','field_evidence_version')}==before
+            'graphql_error_count','graphql_error_details','graphql_error_details_availability','field_evidence_version','test_execution_id')}==before
+        assert after['test_execution_id'] is None
         assert after['safe_graphql_document'] is None and after['document_availability']=='unavailable'
         assert after['graphql_error_count'] is None and after['graphql_error_details'] is None
         assert after['graphql_error_details_availability'] == 'unavailable'

@@ -18,6 +18,7 @@ from app.database import SessionFactory, get_session_factory
 from app.e2e_capture import capture_e2e_exchange, load_run_snapshot
 from app.services import ConflictError, NotFoundError, ensure_visible_run
 from app.models import GraphQLService
+from app.test_executions import admit_request, get_execution, release_request
 from app.upstream import (validate_endpoint, UnsafeEndpoint, legacy_enabled, PinnedTransport,
                           MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, UpstreamTooLarge, outbound_slot)
 
@@ -30,6 +31,7 @@ EXCLUDED_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
     "cookie2", "set-cookie2", "host", "content-length", "x-coverage-run-id", "x-coverage-api-key", "x-csrf-token",
+    "x-test-id", "x-scenario-name",
 }
 MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024
 
@@ -68,6 +70,22 @@ def coverage_run_id(request: Request) -> uuid.UUID | None:
         return run_id
     except ValueError:
         raise HTTPException(status_code=400, detail="X-Coverage-Run-Id must contain one UUID") from None
+
+
+def coverage_test_id(request: Request) -> uuid.UUID | None:
+    values = request.headers.getlist("x-coverage-test-execution-id")
+    if not values:
+        return None
+    try:
+        if len(values) != 1:
+            raise ValueError
+        value = values[0].strip()
+        ident = uuid.UUID(value)
+        if str(ident) != value.lower():
+            raise ValueError
+        return ident
+    except ValueError:
+        raise HTTPException(400, "X-Coverage-Test-Execution-Id must contain one UUID") from None
 
 
 def decoded_response_copy(content: bytes, headers: httpx.Headers) -> bytes | None:
@@ -154,12 +172,18 @@ def trusted_e2e_cookies(request: Request, principal: Principal) -> bool:
     }},
 }, "parameters": [{"name": "X-Coverage-Run-Id", "in": "header", "required": False,
     "description": "Required UUID of a running run; determines service upstream. Only explicit legacy CLI mode permits omission.",
-    "schema": {"type": "string", "format": "uuid"}}]},
+    "schema": {"type": "string", "format": "uuid"}},
+    {"name": "X-Coverage-Test-Execution-Id", "in": "header", "required": False,
+     "description": "Optional active test execution UUID registered for this run. Never forwarded upstream.",
+     "schema": {"type": "string", "format": "uuid"}}]},
     description="Routes through run → snapshot → service.endpointUrl. Original body is forwarded unchanged. "
                 "Browser cookies and internal coverage headers are stripped. No redirects or automatic retries.")
 async def graphql_proxy(request: Request, session: AsyncSession | None = Depends(get_proxy_session),
-                        principal: Principal = Depends(require_proxy_operator)):
+                        principal: Principal = Depends(require_proxy_operator), sessions=Depends(get_session_factory)):
     run_id = coverage_run_id(request)
+    execution_id = coverage_test_id(request)
+    if execution_id is not None and run_id is None:
+        raise HTTPException(400, "A test execution requires X-Coverage-Run-Id")
     analyzer = None
     if run_id is None and (not trusted_e2e_cookies(request, principal) or not legacy_enabled()):
         raise HTTPException(status_code=400, detail="X-Coverage-Run-Id is required (CLI compatibility requires explicit legacy mode)")
@@ -172,6 +196,10 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
             if not principal.admin:
                 await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
             snapshot = await load_run_snapshot(session, run_id)
+            if execution_id is not None:
+                execution = await get_execution(session, run_id, execution_id)
+                if execution.status != "running":
+                    raise ConflictError("Test execution has already finished")
             service = await session.get(GraphQLService, snapshot.service_id)
             if service is None:
                 raise NotFoundError("GraphQL service not found")
@@ -212,6 +240,32 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
     allow_cookies = trusted_e2e_cookies(request, principal)
     headers = forwarded_headers(httpx.Headers(request.headers.raw), strip_forwarding=True,
                                 allow_cookies=allow_cookies)
+    if execution_id is not None:
+        try:
+            await admit_request(session, run_id, execution_id)
+        except NotFoundError:
+            raise HTTPException(404, "Test execution not found") from None
+        except ConflictError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except Exception as exc:
+            internal_failure("test_execution_admission", exc, run_id=run_id)
+            raise HTTPException(503, "Test coverage storage is unavailable") from None
+    try:
+        return await forward_exchange(session, run_id, analyzer, target, destination, body, headers, allow_cookies, execution_id)
+    finally:
+        if execution_id is not None:
+            cleanup = asyncio.create_task(release_request(sessions, execution_id))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+            except Exception as exc:
+                internal_failure("test_execution_release", exc, run_id=run_id)
+                raise HTTPException(502, "Test coverage state could not be saved; upstream may have executed the request. Do not retry automatically.") from None
+
+
+async def forward_exchange(session, run_id, analyzer, target, destination, body, headers, allow_cookies, execution_id):
     started = time.perf_counter()
     try:
         # No shared cookie jar, socket pool, DNS resolution or automatic retry.
@@ -244,6 +298,7 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
                 session, run_id=run_id, request_body=body,
                 decoded_response_body=decoded_response_copy(content, upstream.headers),
                 http_status=upstream.status_code, duration_ms=duration_ms, analyzer=analyzer,
+                **({"test_execution_id": execution_id} if execution_id is not None else {}),
             )
         except Exception as exc:
             internal_failure("observation_save", exc, run_id=run_id)

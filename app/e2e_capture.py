@@ -83,6 +83,7 @@ async def capture_e2e_exchange(
     duration_ms: int | None,
     analyzer: Analyzer,
     http_method: str = "POST",
+    test_execution_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Analyze one completed upstream exchange and commit its observation.
 
@@ -146,6 +147,7 @@ async def capture_e2e_exchange(
     return await record_observation(
         session,
         RequestObservationInput(
+            test_execution_id=test_execution_id,
             run_id=run_id,
             analysis=analysis,
             http_method=http_method,

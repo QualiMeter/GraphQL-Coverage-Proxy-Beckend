@@ -110,9 +110,45 @@ class TestRun(Base):
     )
 
 
+class TestExecution(Base):
+    __tablename__ = "test_executions"
+    __table_args__ = (
+        UniqueConstraint("id", "run_id", name="uq_test_executions_id_run"),
+        UniqueConstraint("run_id", "framework", "test_key", "attempt", name="uq_test_executions_attempt"),
+        CheckConstraint("framework IN ('pytest', 'playwright')", name="valid_test_framework"),
+        CheckConstraint("attempt BETWEEN 1 AND 10000", name="valid_test_attempt"),
+        CheckConstraint("in_flight_requests >= 0", name="nonnegative_test_in_flight"),
+        CheckConstraint("status IN ('running', 'passed', 'failed', 'skipped', 'interrupted')", name="valid_test_status"),
+        CheckConstraint("(status = 'running' AND finished_at IS NULL AND duration_ms IS NULL) OR "
+                        "(status <> 'running' AND finished_at IS NOT NULL AND duration_ms IS NOT NULL AND duration_ms >= 0)",
+                        name="valid_test_completion"),
+        CheckConstraint("failure_code IS NULL OR failure_code IN ('test_failed', 'assertion_failed', 'setup_failed', "
+                        "'teardown_failed', 'timeout', 'runner_interrupted')", name="valid_test_failure_code"),
+        Index("ix_test_executions_run_started_id", "run_id", "started_at", "id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("test_runs.id", ondelete="RESTRICT"), nullable=False)
+    test_id: Mapped[str] = mapped_column(String(2048), nullable=False)
+    test_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    framework: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    in_flight_requests: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class ObservedRequest(Base):
     __tablename__ = "observed_requests"
     __table_args__ = (
+        ForeignKeyConstraint(["test_execution_id", "run_id"], ["test_executions.id", "test_executions.run_id"],
+                             name="fk_observed_requests_test_execution_run", ondelete="RESTRICT"),
+        Index("ix_requests_test_execution_created_id", "test_execution_id", "created_at", "id"),
         CheckConstraint(
             "(document_availability = 'unavailable' AND safe_graphql_document IS NULL) OR "
             "(document_availability IN ('available', 'redacted') AND safe_graphql_document IS NOT NULL "
@@ -153,6 +189,7 @@ class ObservedRequest(Base):
     )
 
     field_evidence_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    test_execution_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
     id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
