@@ -22,7 +22,8 @@ class AuthBoundaryMiddleware:
         is_introspection = path == "/api/schemas/import/introspection" and scope["method"] == "POST"
         is_sdl = path == "/api/schemas/import" and scope["method"] == "POST"
         is_schema_write = path.startswith("/api/schemas/") and scope["method"] == "PATCH"
-        if is_auth or is_service_write or is_introspection or is_sdl or is_schema_write:
+        is_gitlab = path == "/api/runs/gitlab" and scope["method"] == "POST"
+        if is_auth or is_service_write or is_introspection or is_sdl or is_schema_write or is_gitlab:
             body_limit = 1_048_576 if is_sdl else 16_384
             body = bytearray()
             while True:

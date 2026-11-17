@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -11,14 +12,26 @@ from app.api import router
 from app.auth_api import router as auth_router
 from app.auth_boundary import AuthBoundaryMiddleware, route_path
 from app.config import cors_origins
-from app.database import engine
+from app.database import SessionFactory, engine
 from app.proxy import router as proxy_router
+from app.gitlab_api import router as gitlab_router
+from app.gitlab_config import gitlab_enabled, gitlab_settings
+from app.gitlab_runs import monitor
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    yield
-    await engine.dispose()
+    task = None
+    if gitlab_enabled():
+        task = asyncio.create_task(monitor(SessionFactory, gitlab_settings()), name="gitlab-monitor")
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await engine.dispose()
 
 
 app = FastAPI(title="GraphQL Coverage API", version="0.1.0", lifespan=lifespan)
@@ -29,6 +42,7 @@ app.add_middleware(AuthBoundaryMiddleware)
 app.include_router(router)
 app.include_router(auth_router)
 app.include_router(proxy_router)
+app.include_router(gitlab_router)
 
 
 @app.get("/health", tags=["System"])
@@ -40,7 +54,8 @@ async def health():
 async def safe_validation_error(request: Request, exc: RequestValidationError):
     if (route_path(request.scope).startswith("/api/auth/")
             or route_path(request.scope).startswith("/api/services")
-            or route_path(request.scope).startswith("/api/schemas")):
+            or route_path(request.scope).startswith("/api/schemas")
+            or route_path(request.scope) == "/api/runs/gitlab"):
         # Pydantic's default error input can echo a submitted password or body.
         return JSONResponse(status_code=422, content={"detail": [
             {key: error[key] for key in ("type", "loc", "msg")} for error in exc.errors()

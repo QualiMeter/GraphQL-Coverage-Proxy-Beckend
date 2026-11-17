@@ -17,7 +17,7 @@ from app.api_models import (
 from app.contracts import RequestObservationInput
 from app.auth_models import ServiceGrant
 from app.models import (
-    GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField,
+    GitLabPipeline, GraphQLService, ObservedRequest, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
 )
 from app.schema_metadata import schema_metadata, root_types, argument_metadata, abstract_metadata
@@ -336,13 +336,18 @@ async def list_schemas(session: AsyncSession, service_id: uuid.UUID) -> list[Sch
 
 async def create_run(
     session: AsyncSession, snapshot_id: uuid.UUID, name: str, metadata: dict,
-    *, include_metadata: bool = True,
+    *, include_metadata: bool = True, commit: bool = True,
 ) -> RunOut:
     service = await session.scalar(select(GraphQLService).join(
         SchemaSnapshot, SchemaSnapshot.service_id == GraphQLService.id,
     ).where(SchemaSnapshot.id == snapshot_id).with_for_update(of=GraphQLService))
     if service is None:
         raise NotFoundError("Schema snapshot not found")
+    unresolved = await session.scalar(select(GitLabPipeline.run_id).join(
+        TestRun, TestRun.id == GitLabPipeline.run_id,
+    ).where(TestRun.snapshot_id == snapshot_id, GitLabPipeline.finished_at.is_(None)).limit(1))
+    if unresolved is not None:
+        raise ConflictError("A GitLab pipeline is still active or awaiting reconciliation for this snapshot")
     existing = await session.scalar(
         select(TestRun.id).where(TestRun.snapshot_id == snapshot_id, TestRun.status == "running")
     )
@@ -351,7 +356,10 @@ async def create_run(
     row = TestRun(snapshot_id=snapshot_id, name=name, status="running", metadata_json=metadata)
     session.add(row)
     try:
-        await session.commit()
+        if commit:
+            await session.commit()
+        else:
+            await session.flush()
     except IntegrityError as exc:
         await session.rollback()
         raise ConflictError("A run is already active for this schema snapshot") from exc
@@ -367,16 +375,26 @@ async def list_runs(
     return rows
 
 
-async def finish_run(session: AsyncSession, run_id: uuid.UUID, *, include_metadata: bool = True) -> RunOut:
+async def finish_run(
+    session: AsyncSession, run_id: uuid.UUID, *, include_metadata: bool = True,
+    pipeline_managed: bool = False, status: str = "completed", commit: bool = True,
+) -> RunOut:
     # Row locking also prevents a concurrent request from recording after completion.
     run = await session.scalar(select(TestRun).where(TestRun.id == run_id).with_for_update())
     if run is None:
         raise NotFoundError("Test run not found")
     if run.status != "running":
         raise ConflictError("The run has already finished")
-    run.status = "completed"
+    if not pipeline_managed and await session.get(GitLabPipeline, run_id) is not None:
+        raise ConflictError("This run is managed by GitLab and cannot be finished manually")
+    if status not in {"completed", "failed"}:
+        raise ValueError("Invalid final run status")
+    run.status = status
     run.finished_at = datetime.now(timezone.utc)
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     await session.refresh(run)
     return run_out(run, include_metadata=include_metadata)
 
