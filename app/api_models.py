@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
-from app.contracts import OperationType
+from app.contracts import OperationType, RunStatus
 from app.graphql_errors import ErrorDetailsAvailability
 from app.safe_document import DocumentAvailability
 
@@ -105,7 +105,7 @@ class RunOut(ApiModel):
     id: uuid.UUID
     snapshot_id: uuid.UUID
     name: str
-    status: str
+    status: RunStatus
     started_at: datetime
     finished_at: datetime | None
     metadata: dict[str, Any]

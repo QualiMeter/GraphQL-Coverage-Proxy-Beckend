@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.access import require_role
 from app.api_models import ApiModel
 from app.auth import Principal, current_principal, visibility_kwargs
+from app.contracts import RunStatus
 from app.database import get_session_factory
 from app.diagnostics import internal_failure
 from app.gitlab_client import GitLabClient, GitLabError
@@ -56,10 +57,11 @@ class PipelineOut(ApiModel):
     pipeline_id: int | None
     pipeline_url: str | None
     pipeline_status: str
-    run_status: str
+    run_status: RunStatus
     error_code: str | None
     created_at: datetime
     finished_at: datetime | None
+    collection_incomplete: bool = Field(description="Collection stopped before a trustworthy terminal outcome; observations are retained and this flag never clears.")
     tracking_finished: bool
 
 
@@ -67,6 +69,7 @@ def output(row, run):
     return PipelineOut(run_id=row.run_id, pipeline_id=row.pipeline_id, pipeline_url=row.pipeline_url,
                        pipeline_status=row.pipeline_status, run_status=run.status,
                        error_code=row.error_code, created_at=row.created_at, finished_at=row.finished_at,
+                       collection_incomplete=row.collection_incomplete,
                        tracking_finished=row.finished_at is not None)
 
 

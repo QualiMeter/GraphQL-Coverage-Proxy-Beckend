@@ -20,13 +20,18 @@ from app.models import (
 )
 from app.api_models import RunComparisonRequest
 from app.auth import Principal
-from app.run_comparison import RunComparisonError, compare_run_series
+from app.run_comparison import RunComparisonError, compare_run_series as build_comparison, load_run_comparison
 from app.run_analytics import get_run_stats, list_operations, operation_key
 from app.services import (
     NotFoundError, create_run, create_service, finish_run, get_run_graph, import_sdl,
     record_observation,
 )
 from test_e2e_capture_postgres import postgres_session  # noqa: F401
+
+
+async def compare_run_series(session, payload, principal):
+    # Test caller owns its savepoint; production releases the snapshot in API.
+    return await build_comparison(await load_run_comparison(session, payload, principal), payload)
 
 
 pytestmark = pytest.mark.integration

@@ -106,7 +106,7 @@ async def test_pipeline_completion_keeps_coverage_and_is_idempotent(setup, final
         row = await s.get(GitLabPipeline, item.run_id)
         finished = run.finished_at
         assert run.status == "completed" and row.pipeline_status == final
-        assert row.finished_at is not None
+        assert row.finished_at is not None and not row.collection_incomplete
         graph = await get_run_graph(s, item.run_id)
         assert graph.summary.covered_fields == 1
     await apply_result(sessions, item, config, info=info(final))
@@ -178,9 +178,10 @@ async def test_deadline_stops_collection_but_quarantines_snapshot_until_reconcil
     client.reconcile.side_effect = GitLabError("gitlab_network_error")
     await poll_once(sessions, config, client)
     async with sessions() as s:
-        assert (await s.get(Run, item.run_id)).status == ("completed" if known else "failed")
+        assert (await s.get(Run, item.run_id)).status == "failed"
         row = await s.get(GitLabPipeline, item.run_id)
         assert row.error_code == "tracking_deadline_exceeded" and row.finished_at is None
+        assert row.collection_incomplete
         with pytest.raises(ConflictError):
             await create_run(s, snapshot.id, "unsafe duplicate", {})
     await due(sessions, item)
@@ -190,7 +191,10 @@ async def test_deadline_stops_collection_but_quarantines_snapshot_until_reconcil
     client.reconcile.return_value = info("success"), 1
     await poll_once(sessions, config, client)
     async with sessions() as s:
-        assert (await s.get(GitLabPipeline, item.run_id)).finished_at is not None
+        row = await s.get(GitLabPipeline, item.run_id)
+        assert row.finished_at is not None and row.collection_incomplete
+        assert row.error_code == "tracking_deadline_exceeded"
+        assert (await s.get(Run, item.run_id)).status == "failed"
         await create_run(s, snapshot.id, "safe next", {})
 
 
@@ -480,3 +484,83 @@ async def test_operator_absence_resolution_is_guarded_and_releases_quarantine(se
         await create_run(session, snapshot.id, "safe next launch", {})
     with pytest.raises(ValueError):
         await gitlab_cli.resolve_absent(item.run_id)
+
+
+@pytest.mark.parametrize("poll_error", [False, True])
+async def test_known_pipeline_deadline_is_incomplete_preserves_observations_and_rejects_compare(isolated_database, monkeypatch, poll_error):
+    sessions = isolated_database
+    async with sessions() as session:
+        service = await create_service(session, "deadline-api", "Deadline API", is_public=True)
+        snapshot = await import_sdl(session, service.id, "type Query { health: String }")
+    config = GitLabSettings("https://gitlab.example", "test-token", {service.id: 123}, "https://coverage.example")
+    monkeypatch.setitem(app.dependency_overrides, get_session_factory, lambda: sessions)
+    # This test owns real transactions: SET TRANSACTION must precede all reads.
+    session = sessions()
+    setup = session, sessions, service, snapshot, config, set()
+    monkeypatch.setenv("COVERAGE_API_KEY", "sol-audit-test-key-" + "x" * 40)
+    baseline = await create_run(session, snapshot.id, "Complete baseline", {})
+    await finish_run(session, baseline.id)
+    item = await prepare(setup)
+    observation = await record_observation(session, RequestObservationInput(
+        run_id=item.run_id, analysis=AnalysisResult(status="success", operation_type="mutation",
+        fields=(FieldReference("Query", "health"),)), http_method="POST", http_status=200,
+        response_has_data=True, graphql_has_errors=False,
+    ))
+    await session.close()
+    client = AsyncMock(spec=GitLabClient)
+    client.launch.return_value = info("running")
+    await launch(sessions, config, item, client)
+    await due(sessions, item, expired=True)
+    client.pipeline.return_value = info("running")
+    if poll_error:
+        client.pipeline.side_effect = GitLabError("gitlab_network_error")
+    assert await poll_once(sessions, config, client)
+    async with sessions() as s:
+        run = await s.get(Run, item.run_id)
+        finished = run.finished_at
+        assert run.status == "failed"
+        row = await s.get(GitLabPipeline, item.run_id)
+        assert row.collection_incomplete and row.finished_at is None
+        assert (await get_run_graph(s, item.run_id)).summary.covered_fields == 1
+        from app.models import ObservedRequest, RequestFieldUsage
+        assert await s.get(ObservedRequest, observation) is not None
+        assert await s.scalar(select(func.count()).select_from(RequestFieldUsage)
+                              .where(RequestFieldUsage.request_id == observation)) == 1
+        with pytest.raises(ConflictError):
+            await prepare_launch(s, config, service.id, snapshot.id, "main", "duplicate")
+    async def check_comparison():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="https://graphql.rebyte.fun",
+                                    headers={"X-Coverage-Api-Key": "sol-audit-test-key-" + "x" * 40}) as http:
+            result = await http.post("/api/runs/compare", json={
+                "runIds": [str(baseline.id), str(item.run_id)], "baselineRunId": str(baseline.id)})
+            assert result.status_code == 409, result.text
+            assert result.json()["code"] == "RUN_NOT_COMPLETED"
+    await check_comparison()
+    # Restarted worker continues checking the existing ID, never POSTing again.
+    await due(sessions, item)
+    client.pipeline.side_effect = None
+    client.pipeline.return_value = info("success")
+    assert await poll_once(sessions, config, client)
+    assert client.launch.await_count == 1 and client.pipeline.await_count == 2
+    client.reconcile.assert_not_called()
+    async with sessions() as s:
+        run, row = await s.get(Run, item.run_id), await s.get(GitLabPipeline, item.run_id)
+        assert run.status == "failed" and run.finished_at == finished
+        assert row.pipeline_status == "success" and row.finished_at is not None
+        assert row.collection_incomplete and row.error_code == "tracking_deadline_exceeded"
+        result = gitlab_api.output(row, run)
+        assert result.collection_incomplete and result.tracking_finished
+        await create_run(s, snapshot.id, "safe next", {})
+    await check_comparison()
+
+
+async def test_first_terminal_observed_after_deadline_is_conservatively_incomplete(setup):
+    _, sessions, _, _, config, _ = setup
+    item = await prepare(setup)
+    await due(sessions, item, expired=True)
+    claimed = await claim(sessions)
+    await apply_result(sessions, claimed, config, info=info("success"))
+    async with sessions() as s:
+        assert (await s.get(Run, item.run_id)).status == "failed"
+        assert (await s.get(GitLabPipeline, item.run_id)).collection_incomplete

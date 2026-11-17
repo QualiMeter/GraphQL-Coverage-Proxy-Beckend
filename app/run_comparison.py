@@ -24,6 +24,7 @@ from app.auth import Principal
 from app.auth_models import ServiceGrant
 from app.models import (
     GraphQLService,
+    GitLabPipeline,
     ObservedRequest,
     RequestFieldUsage,
     SchemaField,
@@ -32,6 +33,7 @@ from app.models import (
     TestRun,
 )
 from app.schema_cache import schema_from_sdl
+from app.schema_work import comparison_work
 from app.services import NotFoundError, counted_observation
 
 
@@ -78,20 +80,28 @@ def _round(value):
     return round(float(value), 2) if value is not None else None
 
 
-async def compare_run_series(
+async def load_run_comparison(
     session: AsyncSession,
     payload: RunComparisonRequest,
     principal: Principal,
-) -> RunComparisonResponse:
-    """Aggregate a selected run series without loading requests into Python."""
+) -> "ComparisonData":
+    """Materialize batched scalar rows within the caller's read-only snapshot.
+
+    The caller must close the transaction/session before starting CPU work.
+    No ORM objects, sessions, connections or lazy results escape this phase.
+    """
     selected_ids = payload.run_ids
     statement = (
         select(
             TestRun.id.label("run_id"), TestRun.snapshot_id, TestRun.name, TestRun.status,
             TestRun.started_at, TestRun.finished_at,
+            GitLabPipeline.collection_incomplete, GitLabPipeline.error_code.label("pipeline_error"),
+            GitLabPipeline.run_id.label("pipeline_run_id"),
+            GitLabPipeline.finished_at.label("pipeline_finished_at"),
             SchemaSnapshot.id.label("snapshot_uuid"), SchemaSnapshot.schema_hash,
             SchemaSnapshot.schema_sdl,
         )
+        .outerjoin(GitLabPipeline, GitLabPipeline.run_id == TestRun.id)
         .join(SchemaSnapshot, SchemaSnapshot.id == TestRun.snapshot_id)
         .join(GraphQLService, GraphQLService.id == SchemaSnapshot.service_id)
         .where(TestRun.id.in_(selected_ids), _visible_service_filter(principal))
@@ -109,15 +119,12 @@ async def compare_run_series(
     snapshot_ids = {run.snapshot_id for run in runs}
     if len(snapshot_ids) != 1:
         raise RunComparisonError("SNAPSHOT_MISMATCH", "All selected runs must use the same schema snapshot")
-    if any(run.status != "completed" for run in runs):
+    if any(run.status != "completed" for run in runs) or any(
+        row["collection_incomplete"] or row["pipeline_error"] == "tracking_deadline_exceeded"
+        or (row["pipeline_run_id"] is not None and row["pipeline_finished_at"] is None)
+        for row in selected
+    ):
         raise RunComparisonError("RUN_NOT_COMPLETED", "All selected runs must be completed")
-
-    by_id = {run.id: run for run in runs}
-    baseline = by_id[payload.baseline_run_id]
-    target_id = payload.target_run_id
-    if target_id is None:
-        target_id = next(run.id for run in reversed(runs) if run.id != baseline.id)
-    target = by_id[target_id]
 
     snapshot = _SnapshotRow(
         id=selected[0]["snapshot_uuid"], schema_hash=selected[0]["schema_hash"],
@@ -143,11 +150,6 @@ async def compare_run_series(
                SchemaType.snapshot_id == snapshot.id, SchemaType.kind == "OBJECT")
         .group_by(RequestFieldUsage.field_id, ObservedRequest.run_id)
     )).mappings().all()
-    hits_by_field: dict[uuid.UUID, dict[uuid.UUID, int]] = {}
-    for row in hit_rows:
-        hits_by_field.setdefault(row["field_id"], {})[row["run_id"]] = row["hits"]
-
-    statuses = ("success", "parse_error", "validation_error", "unsupported", "internal_error")
     request_metric_rows = (await session.execute(
         select(
             ObservedRequest.run_id,
@@ -159,14 +161,13 @@ async def compare_run_series(
             func.percentile_cont(0.95).within_group(ObservedRequest.duration_ms)
                 .filter(ObservedRequest.duration_ms.is_not(None)).label("p95_duration_ms"),
             *[func.count().filter(ObservedRequest.analysis_status == status).label(status)
-              for status in statuses],
+              for status in _STATUSES],
             *[func.count().filter(ObservedRequest.operation_type == operation).label(f"{operation}_requests")
               for operation in ("query", "mutation", "subscription")],
         )
         .where(ObservedRequest.run_id.in_(selected_ids))
         .group_by(ObservedRequest.run_id)
     )).mappings().all()
-    request_metrics = {row["run_id"]: row for row in request_metric_rows}
 
     operation_identities = (
         select(ObservedRequest.run_id)
@@ -180,8 +181,45 @@ async def compare_run_series(
         select(operation_identities.c.run_id, func.count().label("unique_operations"))
         .group_by(operation_identities.c.run_id)
     )).all()
-    unique_operations: dict[uuid.UUID, int] = {run_id: 0 for run_id in selected_ids}
-    for row in operation_rows:
+    return ComparisonData(runs, snapshot, field_rows, hit_rows, request_metric_rows, operation_rows)
+
+
+@dataclass(frozen=True)
+class ComparisonData:
+    runs: list[_RunRow]
+    snapshot: _SnapshotRow
+    field_rows: list
+    hit_rows: list
+    request_metric_rows: list
+    operation_rows: list
+
+
+_STATUSES = ("success", "parse_error", "validation_error", "unsupported", "internal_error")
+
+
+async def compare_run_series(data: ComparisonData, payload: RunComparisonRequest) -> RunComparisonResponse:
+    """Use isolated, bounded comparison capacity after releasing the DB snapshot."""
+    return await comparison_work(_build_run_comparison, data, payload)
+
+
+def _build_run_comparison(data: ComparisonData, payload: RunComparisonRequest) -> RunComparisonResponse:
+    runs, snapshot = data.runs, data.snapshot
+    field_rows, hit_rows = data.field_rows, data.hit_rows
+    statuses = _STATUSES
+    by_id = {run.id: run for run in runs}
+    baseline = by_id[payload.baseline_run_id]
+    target_id = payload.target_run_id
+    if target_id is None:
+        target_id = next(run.id for run in reversed(runs) if run.id != baseline.id)
+    target = by_id[target_id]
+
+    hits_by_field: dict[uuid.UUID, dict[uuid.UUID, int]] = {}
+    for row in hit_rows:
+        hits_by_field.setdefault(row["field_id"], {})[row["run_id"]] = row["hits"]
+
+    request_metrics = {row["run_id"]: row for row in data.request_metric_rows}
+    unique_operations = {run.id: 0 for run in runs}
+    for row in data.operation_rows:
         unique_operations[row.run_id] = row.unique_operations
 
     total_by_type: dict[str, int] = {}

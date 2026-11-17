@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from app.api_models import ApiModel, RequestDetailOut, RequestOut, SelectedFieldOut
-from app.contracts import AnalysisStatus, OperationType
+from app.contracts import AnalysisStatus, OperationType, RunStatus
 from app.models import ObservedRequest, RequestFieldUsage, SchemaField, SchemaSnapshot, SchemaType, TestRun
 from app.services import NotFoundError, run_out
 
@@ -44,7 +44,7 @@ class DateRange(ApiModel):
 class RunFilters(DateRange):
     snapshot_id: uuid.UUID | None = None
     service_id: uuid.UUID | None = None
-    status: Literal["running", "completed"] | None = None
+    status: RunStatus | None = None
     limit: int | None = Field(default=None, ge=1, le=500, description="Omit for all matching history (legacy compatibility); use explicit pages for large histories.")
     offset: int = Field(default=0, ge=0)
 

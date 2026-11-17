@@ -121,7 +121,7 @@ async def test_empty_history(journal_context, postgres_session):
 
 @pytest.mark.parametrize('params', [
     {}, {'snapshotId': 'bad'}, {'serviceId': 'bad'},
-    {'status': 'failed'}, {'status': 'bogus'}, {'limit': 0}, {'limit': 501}, {'offset': -1},
+    {'status': 'bogus'}, {'limit': 0}, {'limit': 501}, {'offset': -1},
     {'from': '2026-11-15'}, {'from': '2026-11-15T00:00:00'},
     {'from': '2026-11-16T00:00:00Z', 'to': '2026-11-15T00:00:00Z'},
     {'from': '2026-11-15T00:00:00Z', 'to': '2026-11-15T00:00:00Z'},
@@ -373,3 +373,25 @@ async def test_missing_scopes_empty_journal_and_query_count(journal_context, pos
         assert len(queries) == 4  # Two ACL reads + request + all selected fields.
     finally:
         event.remove(engine, 'before_cursor_execute', capture)
+
+
+@pytest.mark.parametrize('status', ['running', 'completed', 'failed'])
+@pytest.mark.parametrize('scope', ['serviceId', 'snapshotId'])
+async def test_all_run_status_filters_compose_with_scope_and_pagination(journal_context, postgres_session, status, scope):
+    client, service, schema, other_schema, runs, active, *_ = journal_context
+    failures = []
+    for index, snapshot in enumerate((schema, schema, other_schema), 10):
+        row = Run(id=uuid.UUID(int=index), snapshot_id=snapshot.id, name='Failed',
+                  status='failed', started_at=AT, finished_at=AT, metadata_json={})
+        postgres_session.add(row)
+        failures.append(row)
+    await postgres_session.commit()
+    expected = {'running': [active], 'completed': list(reversed(runs)), 'failed': list(reversed(failures))}[status]
+    if scope == 'snapshotId':
+        expected = [r for r in expected if r.snapshot_id == schema.id]
+    params = {scope: str(service.id if scope == 'serviceId' else schema.id), 'status': status, 'limit': 1}
+    pages = [await client.get('/api/runs', params={**params, 'offset': i}) for i in range(len(expected) + 1)]
+    assert all(p.status_code == 200 for p in pages)
+    assert all(p.headers['X-Total-Count'] == str(len(expected)) for p in pages)
+    assert [r['id'] for p in pages for r in p.json()] == [str(r.id) for r in expected]
+    assert all(r['status'] == status for p in pages for r in p.json())
