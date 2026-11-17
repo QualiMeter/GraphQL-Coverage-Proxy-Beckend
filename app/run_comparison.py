@@ -24,6 +24,7 @@ from app.auth import Principal
 from app.auth_models import ServiceGrant
 from app.models import (
     GraphQLService,
+    GitLabPipeline,
     ObservedRequest,
     RequestFieldUsage,
     SchemaField,
@@ -89,9 +90,13 @@ async def compare_run_series(
         select(
             TestRun.id.label("run_id"), TestRun.snapshot_id, TestRun.name, TestRun.status,
             TestRun.started_at, TestRun.finished_at,
+            GitLabPipeline.collection_incomplete, GitLabPipeline.error_code.label("pipeline_error"),
+            GitLabPipeline.run_id.label("pipeline_run_id"),
+            GitLabPipeline.finished_at.label("pipeline_finished_at"),
             SchemaSnapshot.id.label("snapshot_uuid"), SchemaSnapshot.schema_hash,
             SchemaSnapshot.schema_sdl,
         )
+        .outerjoin(GitLabPipeline, GitLabPipeline.run_id == TestRun.id)
         .join(SchemaSnapshot, SchemaSnapshot.id == TestRun.snapshot_id)
         .join(GraphQLService, GraphQLService.id == SchemaSnapshot.service_id)
         .where(TestRun.id.in_(selected_ids), _visible_service_filter(principal))
@@ -109,7 +114,11 @@ async def compare_run_series(
     snapshot_ids = {run.snapshot_id for run in runs}
     if len(snapshot_ids) != 1:
         raise RunComparisonError("SNAPSHOT_MISMATCH", "All selected runs must use the same schema snapshot")
-    if any(run.status != "completed" for run in runs):
+    if any(run.status != "completed" for run in runs) or any(
+        row["collection_incomplete"] or row["pipeline_error"] == "tracking_deadline_exceeded"
+        or (row["pipeline_run_id"] is not None and row["pipeline_finished_at"] is None)
+        for row in selected
+    ):
         raise RunComparisonError("RUN_NOT_COMPLETED", "All selected runs must be completed")
 
     by_id = {run.id: run for run in runs}

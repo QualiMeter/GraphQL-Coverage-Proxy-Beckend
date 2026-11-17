@@ -84,23 +84,31 @@ async def apply_result(sessions, item: Work, settings: GitLabSettings, *, info: 
         if row is None or row.finished_at is not None or row.lease_token != item.lease:
             return
         stamp = now()
+        # Once collection expires it cannot become complete again, even when
+        # a later poll finally learns the terminal pipeline outcome.
+        if not rejected and stamp >= row.deadline_at:
+            row.collection_incomplete = True
         if page is not None:
             row.reconcile_page = page
         if info is None and row.pipeline_id is None and not rejected:
             row.pipeline_status = "launch_unknown"
         if info is not None:
             row.pipeline_id, row.pipeline_url, row.pipeline_status = info.id, info.url, info.status
-            row.error_code = None
+            if not row.collection_incomplete:
+                row.error_code = None
             row.check_failures = 0
         elif error is not None:
-            row.error_code = error.code
+            if not row.collection_incomplete:
+                row.error_code = error.code
             row.check_failures += 1
             if row.pipeline_id is None:
                 row.pipeline_status = "launch_rejected" if rejected else "launch_unknown"
+        if row.collection_incomplete:
+            row.error_code = "tracking_deadline_exceeded"
         if rejected or (info is not None and info.status in TERMINAL):
             if run.status == "running":
                 await finish_run(session, item.run_id, pipeline_managed=True,
-                                 status="failed" if rejected else "completed", commit=False)
+                                 status="failed" if rejected or row.collection_incomplete else "completed", commit=False)
             row.finished_at = stamp
         elif stamp >= row.deadline_at:
             # Stop collection on a finite deadline, retain observations, and keep
@@ -108,7 +116,7 @@ async def apply_result(sessions, item: Work, settings: GitLabSettings, *, info: 
             # against duplicate launches until GitLab's outcome is known.
             if run.status == "running":
                 await finish_run(session, item.run_id, pipeline_managed=True,
-                                 status="completed" if row.pipeline_id else "failed", commit=False)
+                                 status="failed", commit=False)
             row.error_code = "tracking_deadline_exceeded"
         delay = min(300, settings.poll_seconds * 2 ** min(row.check_failures, 5))
         row.next_check_at = stamp + timedelta(seconds=delay)
