@@ -67,6 +67,18 @@ def test_analyzes_nested_fields_lists_aliases_and_uses_schema_coordinates():
         ("Order", "total"),
     }
     assert len(result.fields) == len(coordinates(result))
+    assert result.max_depth == 3
+    assert {
+        tuple((field.type_name, field.field_name) for field in path)
+        for path in result.paths
+    } == {
+        (("Query", "user"),),
+        (("Query", "user"), ("User", "id")),
+        (("Query", "user"), ("User", "name")),
+        (("Query", "user"), ("User", "orders")),
+        (("Query", "user"), ("User", "orders"), ("Order", "id")),
+        (("Query", "user"), ("User", "orders"), ("Order", "total")),
+    }
 
 
 def test_selects_only_operation_named_in_request():
@@ -212,6 +224,45 @@ def test_nested_type_conditions_keep_the_narrower_runtime_type():
     result = analyze_query(SCHEMA, GraphQLQueryInput(query))
     assert result.status == "success"
     assert coordinates(result) == {("Query", "user"), ("Node", "id")}
+
+
+def test_fragments_do_not_increase_depth_and_paths_keep_type_condition_fields():
+    result = analyze_query(
+        SCHEMA,
+        GraphQLQueryInput(query="""
+            { search { ... on User { ...UserDetails } } }
+            fragment UserDetails on User { name }
+        """),
+    )
+
+    assert result.status == "success"
+    assert result.max_depth == 2
+    assert result.paths == (
+        (FieldReference("Query", "search"),),
+        (FieldReference("Query", "search"), FieldReference("User", "name")),
+    )
+
+
+def test_reused_fragment_yields_distinct_paths_but_aliases_are_not_in_paths():
+    result = analyze_query(
+        SCHEMA,
+        GraphQLQueryInput(query="""
+            {
+              primary: user(id: "1") { ...UserDetails }
+              search { ... on User { ...UserDetails } }
+            }
+            fragment UserDetails on User { display: name }
+        """),
+    )
+
+    assert result.status == "success"
+    paths = {
+        tuple((field.type_name, field.field_name) for field in path)
+        for path in result.paths
+    }
+    assert (("Query", "user"), ("User", "name")) in paths
+    assert (("Query", "search"), ("User", "name")) in paths
+    assert len(paths) == len(result.paths)
 
 
 @pytest.mark.parametrize("query", [

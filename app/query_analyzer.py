@@ -32,6 +32,7 @@ from app.diagnostics import internal_failure
 MAX_QUERY_TOKENS = 10_000
 MAX_SELECTION_DEPTH = 64
 MAX_SELECTION_VISITS = 20_000
+MAX_PATHS_PER_REQUEST = 5_000
 
 
 class _UnsupportedDirective(Exception):
@@ -154,7 +155,9 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
     try:
         for variable in operation.variable_definitions or ():
             _check_directives(variable)
-        fields = _collect_fields(schema, root_type, operation.selection_set, fragments, variable_values)
+        fields, paths, max_depth = _collect_fields(
+            schema, root_type, operation.selection_set, fragments, variable_values,
+        )
     except (_UnsupportedDirective, _AnalysisLimitExceeded) as exc:
         return AnalysisResult(
             status="unsupported",
@@ -167,6 +170,8 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
         operation_type=operation_type,
         operation_name=operation_name,
         fields=fields,
+        paths=paths,
+        max_depth=max_depth,
     )
 
 
@@ -193,11 +198,16 @@ def _collect_fields(
     selection_set: SelectionSetNode,
     fragments: dict[str, FragmentDefinitionNode],
     variables,
-) -> tuple[FieldReference, ...]:
+) -> tuple[
+    tuple[FieldReference, ...],
+    tuple[tuple[FieldReference, ...], ...],
+    int,
+]:
     fields: dict[FieldReference, None] = {}
-    visited_fragments: set[tuple[str, frozenset[GraphQLObjectType]]] = set()
+    paths: dict[tuple[FieldReference, ...], None] = {}
     object_types_by_name: dict[str, frozenset[GraphQLObjectType]] = {}
     visited_selections = 0
+    max_depth = 0
 
     def possible_objects(graphql_type: GraphQLCompositeType) -> frozenset[GraphQLObjectType]:
         if graphql_type.name not in object_types_by_name:
@@ -211,10 +221,11 @@ def _collect_fields(
         parent_type: GraphQLCompositeType,
         selections: SelectionSetNode,
         possible_parent_objects: frozenset[GraphQLObjectType],
-        depth: int,
+        selection_depth: int,
+        parent_path: tuple[FieldReference, ...],
     ) -> None:
-        nonlocal visited_selections
-        if depth > MAX_SELECTION_DEPTH:
+        nonlocal visited_selections, max_depth
+        if selection_depth > MAX_SELECTION_DEPTH:
             raise _AnalysisLimitExceeded
         for selection in selections.selections:
             visited_selections += 1
@@ -228,11 +239,19 @@ def _collect_fields(
                 field_name = selection.name.value
                 if field_name.startswith("__"):
                     continue
-                fields[FieldReference(parent_type.name, field_name)] = None
+                coordinate = FieldReference(parent_type.name, field_name)
+                fields[coordinate] = None
+                path = parent_path + (coordinate,)
+                if path not in paths:
+                    if len(paths) >= MAX_PATHS_PER_REQUEST:
+                        raise _AnalysisLimitExceeded
+                    paths[path] = None
+                max_depth = max(max_depth, len(path))
                 if selection.selection_set is not None:
                     child_type = get_named_type(parent_type.fields[field_name].type)
                     if is_composite_type(child_type):
-                        walk(child_type, selection.selection_set, possible_objects(child_type), depth + 1)
+                        walk(child_type, selection.selection_set, possible_objects(child_type),
+                             selection_depth + 1, path)
                 continue
 
             spread_name = selection.name.value if isinstance(selection, FragmentSpreadNode) else None
@@ -247,12 +266,10 @@ def _collect_fields(
                     continue
             if spread_name is not None:
                 _check_directives(fragment)
-                # The same spread can select different fields on other object types.
-                fragment_visit = (spread_name, matching_objects)
-                if fragment_visit in visited_fragments:
-                    continue
-                visited_fragments.add(fragment_visit)
-            walk(fragment_type, fragment.selection_set, matching_objects, depth + 1)
+            # Fragment/type-condition expansion changes schema context, not
+            # the selected-field depth or canonical field path.
+            walk(fragment_type, fragment.selection_set, matching_objects,
+                 selection_depth + 1, parent_path)
 
-    walk(root_type, selection_set, possible_objects(root_type), 1)
-    return tuple(fields)
+    walk(root_type, selection_set, possible_objects(root_type), 1, ())
+    return tuple(fields), tuple(paths), max_depth

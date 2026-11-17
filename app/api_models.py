@@ -274,6 +274,42 @@ class RunStats(CoverageSummary):
     request_timeline: list[RequestTimelineBucket]
 
 
+class SchemaCoordinateOut(ApiModel):
+    type_name: str
+    field_name: str
+
+
+class QueryPathOut(ApiModel):
+    path: list[SchemaCoordinateOut]
+    path_hits: int
+
+
+class RelationHitOut(ApiModel):
+    from_type: str
+    field_name: str
+    to_type: str
+    relation_hits: int
+
+
+class QueryPathPageOut(ApiModel):
+    total: int
+    items: list[QueryPathOut]
+
+
+class RelationHitPageOut(ApiModel):
+    total: int
+    items: list[RelationHitOut]
+
+
+class RunPathsOut(ApiModel):
+    run_id: uuid.UUID
+    snapshot_id: uuid.UUID
+    path_data_availability: Literal["available", "partial", "unavailable"]
+    max_depth: int | None
+    paths: QueryPathPageOut
+    relations: RelationHitPageOut
+
+
 class ComparisonFieldPage(ApiModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
     filter: Literal[
