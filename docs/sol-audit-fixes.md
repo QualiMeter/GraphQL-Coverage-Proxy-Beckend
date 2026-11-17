@@ -1,7 +1,8 @@
 # Исправления независимого аудита Sol
 
 База: main `41db524295e5cbf27a100bd417f62ddc896b30d6` (проверена повторно перед
-публикацией). Один PR, три логических коммита, без merge/deploy/production changes.
+публикацией). Один PR; исходные замечания — три логических коммита, дополнительное ревью
+конкуренции — отдельные последующие коммиты. Без merge/deploy/production changes.
 Path / Depth / RelationHits не изменялись.
 
 ## B1: неполный GitLab run
@@ -36,10 +37,10 @@ GitLab/журналам. Время само по себе не использу
 Пять пакетных SELECT сохраняют один REPEATABLE READ READ ONLY snapshot, включая
 проверку доступа. Материализуются только scalar rows. Затем API закрывает транзакцию
 и сессию, возвращает соединение в пул и передаёт данные в чистую функцию построения
-результата через существующий schema_work (максимум два worker на event loop).
+результата через bounded comparison_work (максимум два отдельных comparison worker на процесс).
 AsyncSession/соединения/ORM-объекты в поток не передаются. Ожидание worker также
 происходит без DB connection. schema_from_sdl и матрица field × run выполняются в
-worker. Ограничение capacity при cancellation переиспользует существующий механизм.
+worker. Ограничение capacity при cancellation переиспользует общий безопасный механизм.
 
 Фильтры, пагинация, сортировка, категории и числовые результаты сохранены.
 Интеграционный тест выполняет четыре одновременных comparison по 45 001 полю и
@@ -61,7 +62,7 @@ fields.limit=types.limit=1, пустые observations. Две верхнеуро
 request counts всех 20 runs, корректные totals/pages. Это локальное ASGI измерение,
 без внешнего HTTP/TLS; не обещание production latency или ускорения.
 
-Финальное последовательное измерение, без параллельного pytest:
+Исходное последовательное измерение для `e7527a4`, без параллельного pytest:
 
 | Кэш / версия | Comparison, с | Max event-loop gap, с | Max health request, с | Max health от назначенного времени, с |
 | --- | ---: | ---: | ---: | ---: |
@@ -89,7 +90,7 @@ RequestDetail теперь корректно описывает safeGraphqlDocu
 variables не сохраняются; безопасный нормализованный документ может сохраняться,
 исходные секреты и значения аргументов не раскрываются. README согласован.
 
-## Проверки
+## Проверки исходного HEAD e7527a4
 
 - Все unit tests: **621 passed**, 351 deselected, 33.54 s.
 - Все PostgreSQL integration tests: **351 passed**, 621 deselected, 285.85 s.
@@ -117,10 +118,66 @@ observed evidence, Fragments, service ACL и изоляцию пользоват
 
 - `alembic/versions/20261123_incomplete_collection.py`
 - `app/gitlab_runs.py`, `app/gitlab_api.py`, `app/models.py`
-- `app/run_comparison.py`, `app/api.py`
+- `app/run_comparison.py`, `app/api.py`, `app/e2e_capture.py`, `app/schema_work.py`
 - `app/contracts.py`, `app/api_models.py`, `app/journal.py`
 - `tests/test_gitlab_runs_postgres.py`, `tests/test_incomplete_migration_postgres.py`
 - `tests/test_comparison_workers_postgres.py`, `tests/benchmark_comparison.py`
+- `tests/test_capture_comparison_contention_postgres.py`, `tests/test_schema_work.py`
 - `tests/test_run_analytics_postgres.py`, `tests/test_fragment_field_evidence_postgres.py`
 - `tests/test_history_journal_postgres.py`, `tests/test_api_contract.py`
 - `README.md`, `docs/gitlab-e2e.md`, `docs/frontend-history-requests.md`, `docs/sol-audit-fixes.md`
+
+## Дополнительное ревью: конкуренция comparison и capture
+
+Проблема **подтверждена** на исходном HEAD `e7527a4e80d5e2d8cf7f55f604f84e3458a88097`.
+Два comparison занимали общие schema_work slots. Capture повторно открывал read
+transaction в load_run_snapshot после upstream и держал её во время analyzer и
+ожидания response/error/evidence CPU work. В контрольном тесте с прогретой именно
+сохранённой SDL за 5 секунд только 2 из 4 capture достигли CPU queue; оба соединения
+pool_size=2/max_overflow=0 оставались checked out, остальные запросы ждали pool.
+Один и тот же тест на исходном коде падает, после исправления проходит.
+
+Исправление состоит из двух частей:
+
+- Capture копирует неизменяемую SDL в scalar string и закрывает свою read-сессию
+  до normalize/analyzer и любого ожидания CPU. record_observation открывает свежую
+  транзакцию, блокирует и повторно проверяет run. Атомарность observations/usage/
+  evidence и защита от finish во время анализа сохранены.
+- Comparison использует отдельный ThreadPoolExecutor(max_workers=2) и собственный
+  лимит ожидания. MAX_SCHEMA_WORKERS остаётся 2. Comparison не занимает capture slots
+  и не встаёт перед его analyzer в default executor. AsyncSession не передаётся в
+  потоки. Суммарное число comparison-потоков ограничено на процесс; они создаются
+  лениво. Контекст запроса сохраняется через copy_context.
+
+Shield и done callback обоих лимитов оставляют slot занятым до фактического
+окончания потока. Отменённый запрос не записывает результат. Проверены отмена
+работающего/ожидающего worker, ошибки worker, сохранение contextvars, последующее
+использование capacity и отсутствие DB checkouts после отмены.
+
+Новый CI regression: 45 001 поле, 20 completed runs, два реально загруженных через
+API comparison с удержанными CPU workers, четыре GraphQL HTTP capture, PostgreSQL
+pool_size=2/max_overflow=0. Capture workers также остановлены барьером: проверяется
+нулевой checkout даже когда два capture вычисляются и остальные ожидают их лимит.
+Затем capture завершается **до** освобождения comparison workers. Это управляемый
+concurrency-тест, а не обещание production latency.
+
+| Сценарий | Все 4 capture в очереди, с | /health, с | /stats, с | DB checkout в очереди / после | Итог observations |
+| --- | ---: | ---: | ---: | --- | --- |
+| Обычный | 0.159894 | 0.006274 | 0.045109 | 0 / 0 | 4 |
+| Отмена 4 capture и 2 comparison, затем новый capture | 0.139832 | 0.001184 | 0.039772 | 0 / 0 | 1 новый, 0 отменённых |
+
+В обычном сценарии сохранены 8 observed + 4 indeterminate evidence и по одной
+GraphQL error на observation. После отмены сохранены только 2 observed + 1
+indeterminate свежего capture. Число upstream-запросов равно числу HTTP-запросов:
+повторной отправки нет. Comparison сохраняет 45 001 neverCovered для исходных пустых
+runs; последующий comparison также завершается после отмены без потери slots.
+
+Целевые новые integration-тесты: **2 passed, 26.57 s**. Они автоматически входят
+в существующий `pytest -m integration` в Backend CI. Публичный API и схема БД
+дополнительно не менялись. Полный финальный набор и CI указаны в описании PR.
+
+Финальная локальная регрессия после доработки: **624 unit passed** (33.87 s) +
+**353 PostgreSQL integration passed** (316.32 s) = **977 passed, 0 skipped, 0 failed**.
+Единственное предупреждение — прежняя Starlette TestClient/httpx deprecation.
+Compileall, pip check, Docker Compose config и git diff --check прошли.
+Новых миграций нет. Финальный CI для нового HEAD и вердикт см. в PR #38.
