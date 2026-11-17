@@ -73,7 +73,14 @@ class _Matcher:
         for peer in scopes:
             for field in peer.fields:
                 self.step(depth)
-                presence_types.setdefault((field.coordinate, field.response_key), set()).update(field.applicable_types)
+                key = (field.coordinate, field.response_key)
+                previous = presence_types.get(key)
+                if previous is None:
+                    # Share immutable type sets for ordinary fields; copying
+                    # every possible type per alias would inflate proxy memory.
+                    presence_types[key] = field.applicable_types
+                elif previous != field.applicable_types:
+                    presence_types[key] = previous | field.applicable_types
         keys = {key for (coordinate, key), types in presence_types.items()
                 if coordinate is None and possible <= types}
         names = [obj[key] for key in keys if key in obj]
