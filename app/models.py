@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     event,
     Boolean,
     CheckConstraint,
@@ -199,3 +200,28 @@ class RequestFieldUsage(Base):
 
 # Register additive auth models for Alembic metadata and application imports.
 from app.auth_models import BrowserSession, LoginThrottle, ServiceGrant, User  # noqa: E402, F401
+
+
+class GitLabPipeline(Base):
+    __tablename__ = "gitlab_pipelines"
+    __table_args__ = (UniqueConstraint("gitlab_host", "project_id", "pipeline_id",
+                                      name="uq_gitlab_pipeline_external"),)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("test_runs.id", ondelete="RESTRICT"), primary_key=True,
+    )
+    gitlab_host: Mapped[str] = mapped_column(String(2048), nullable=False)
+    project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    pipeline_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    pipeline_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    pipeline_status: Mapped[str] = mapped_column(String(64), nullable=False, default="creating")
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reconcile_page: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    check_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
