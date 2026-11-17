@@ -5,25 +5,41 @@ from __future__ import annotations
 from graphql import (
     GraphQLError,
     GraphQLIncludeDirective,
+    GraphQLObjectType,
     GraphQLSchema,
     GraphQLSkipDirective,
     get_directive_values,
     get_named_type,
     get_variable_values,
+    is_composite_type,
     parse,
     validate,
 )
 from graphql.language import (
     FieldNode,
+    FragmentDefinitionNode,
     FragmentSpreadNode,
     InlineFragmentNode,
     OperationDefinitionNode,
+    SelectionNode,
     SelectionSetNode,
 )
-from graphql.type import GraphQLInterfaceType, GraphQLObjectType
 
-from app.diagnostics import internal_failure
 from app.contracts import AnalysisResult, FieldReference, GraphQLQueryInput
+from app.diagnostics import internal_failure
+
+
+MAX_QUERY_TOKENS = 10_000
+MAX_SELECTION_DEPTH = 64
+MAX_SELECTION_VISITS = 20_000
+
+
+class _UnsupportedDirective(Exception):
+    pass
+
+
+class _AnalysisLimitExceeded(Exception):
+    pass
 
 
 def analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> AnalysisResult:
@@ -35,6 +51,9 @@ def analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysis
     """
     try:
         return _analyze_query(schema, request)
+    except RecursionError:
+        # Parsing or validating a deeply nested document can hit Python's limit.
+        return AnalysisResult(status="unsupported", error_code="ANALYSIS_LIMIT_EXCEEDED")
     except Exception as exc:
         internal_failure("analyzer", exc)
         # Analysis must never break transparent proxying. Do not expose request
@@ -49,7 +68,7 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
         return AnalysisResult(status="validation_error", error_code="INVALID_VARIABLES")
 
     try:
-        document = parse(request.query)
+        document = parse(request.query, max_tokens=MAX_QUERY_TOKENS)
     except GraphQLError:
         return AnalysisResult(status="parse_error", error_code="GRAPHQL_PARSE_ERROR")
 
@@ -94,14 +113,6 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
             error_code="UNSUPPORTED_OPERATION_TYPE",
         )
 
-    if _has_unsupported_selection(operation):
-        return AnalysisResult(
-            status="unsupported",
-            operation_type=operation_type,
-            operation_name=operation_name,
-            error_code="UNSUPPORTED_SELECTION",
-        )
-
     validation_errors = validate(schema, document)
     if validation_errors:
         return AnalysisResult(
@@ -135,45 +146,38 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
             error_code="MISSING_ROOT_TYPE",
         )
 
-    fields: list[FieldReference] = []
-    seen: set[tuple[str, str]] = set()
-    _collect_fields(root_type, operation.selection_set, variable_values, fields, seen)
+    fragments = {
+        definition.name.value: definition
+        for definition in document.definitions
+        if isinstance(definition, FragmentDefinitionNode)
+    }
+    try:
+        _check_directives(operation)
+        for variable in operation.variable_definitions or ():
+            _check_directives(variable)
+        fields = _collect_fields(schema, root_type, operation.selection_set, fragments, variable_values)
+    except (_UnsupportedDirective, _AnalysisLimitExceeded) as exc:
+        return AnalysisResult(
+            status="unsupported",
+            operation_type=operation_type,
+            operation_name=operation_name,
+            error_code="UNSUPPORTED_SELECTION" if isinstance(exc, _UnsupportedDirective) else "ANALYSIS_LIMIT_EXCEEDED",
+        )
     return AnalysisResult(
         status="success",
         operation_type=operation_type,
         operation_name=operation_name,
-        fields=tuple(fields),
+        fields=fields,
     )
 
 
-def _has_unsupported_selection(operation: OperationDefinitionNode) -> bool:
-    """Reject selections whose executed fields cannot be determined safely."""
-    if _has_unsupported_directive(operation.directives or ()):
-        return True
-
-    pending = [operation.selection_set]
-    while pending:
-        selection_set = pending.pop()
-        for selection in selection_set.selections:
-            if isinstance(selection, (FragmentSpreadNode, InlineFragmentNode)):
-                return True
-            if _has_unsupported_directive(selection.directives or ()):
-                return True
-            if isinstance(selection, FieldNode) and selection.selection_set is not None:
-                pending.append(selection.selection_set)
-    return False
+def _check_directives(node) -> None:
+    if any(directive.name.value not in {"skip", "include"} for directive in node.directives or ()):
+        raise _UnsupportedDirective
 
 
-def _has_unsupported_directive(directives) -> bool:
-    # @skip and @include are evaluated below; other execution directives could
-    # change which fields actually execute and therefore must not be guessed.
-    return any(
-        directive.name.value not in {"skip", "include"}
-        for directive in directives
-    )
-
-
-def _selection_is_included(selection: FieldNode, variables: dict) -> bool:
+def _selection_is_included(selection: SelectionNode, variables) -> bool:
+    _check_directives(selection)
     skip = get_directive_values(GraphQLSkipDirective, selection, variables)
     if skip is not None and skip["if"]:
         return False
@@ -182,30 +186,69 @@ def _selection_is_included(selection: FieldNode, variables: dict) -> bool:
 
 
 def _collect_fields(
-    parent_type: GraphQLObjectType | GraphQLInterfaceType,
+    schema: GraphQLSchema,
+    root_type: GraphQLObjectType,
     selection_set: SelectionSetNode,
-    variables: dict,
-    fields: list[FieldReference],
-    seen: set[tuple[str, str]],
-) -> None:
-    for selection in selection_set.selections:
-        if not isinstance(selection, FieldNode) or not _selection_is_included(selection, variables):
-            continue
+    fragments: dict[str, FragmentDefinitionNode],
+    variables,
+) -> tuple[FieldReference, ...]:
+    fields: dict[FieldReference, None] = {}
+    visited_fragments: set[tuple[str, frozenset[GraphQLObjectType]]] = set()
+    possible_types: dict[str, frozenset[GraphQLObjectType]] = {}
+    visits = 0
 
-        # Introspection and meta fields are not part of user schema coverage.
-        field_name = selection.name.value
-        if field_name.startswith("__"):
-            continue
+    def object_types(graphql_type):
+        if graphql_type.name not in possible_types:
+            possible_types[graphql_type.name] = (
+                frozenset((graphql_type,)) if isinstance(graphql_type, GraphQLObjectType)
+                else frozenset(schema.get_possible_types(graphql_type))
+            )
+        return possible_types[graphql_type.name]
 
-        coordinate = (parent_type.name, field_name)
-        if coordinate not in seen:
-            seen.add(coordinate)
-            fields.append(FieldReference(*coordinate))
+    def walk(parent_type, selections, candidates, depth):
+        nonlocal visits
+        if depth > MAX_SELECTION_DEPTH:
+            raise _AnalysisLimitExceeded
+        for selection in selections.selections:
+            visits += 1
+            if visits > MAX_SELECTION_VISITS:
+                raise _AnalysisLimitExceeded
+            if not _selection_is_included(selection, variables):
+                continue
 
-        field_definition = parent_type.fields[field_name]
-        named_type = get_named_type(field_definition.type)
-        if (
-            selection.selection_set is not None
-            and isinstance(named_type, (GraphQLObjectType, GraphQLInterfaceType))
-        ):
-            _collect_fields(named_type, selection.selection_set, variables, fields, seen)
+            if isinstance(selection, FieldNode):
+                field_name = selection.name.value
+                if field_name.startswith("__"):
+                    continue
+                fields[FieldReference(parent_type.name, field_name)] = None
+                if selection.selection_set is not None:
+                    child_type = get_named_type(parent_type.fields[field_name].type)
+                    if is_composite_type(child_type):
+                        walk(child_type, selection.selection_set, object_types(child_type), depth + 1)
+                continue
+
+            if isinstance(selection, InlineFragmentNode):
+                fragment = selection
+            else:
+                fragment = fragments[selection.name.value]
+            condition = fragment.type_condition
+            fragment_type = parent_type if condition is None else schema.get_type(condition.name.value)
+            # Nested conditions narrow the runtime object even when the inner
+            # fragment's declared type is broader than the surrounding type.
+            matching_types = candidates
+            if fragment_type is not parent_type:
+                matching_types = candidates & object_types(fragment_type)
+                if not matching_types:
+                    continue
+            if isinstance(selection, FragmentSpreadNode):
+                _check_directives(fragment)
+                # Deduplicate repeated spreads without dropping other possible
+                # runtime types when the same fragment is used elsewhere.
+                key = (selection.name.value, matching_types)
+                if key in visited_fragments:
+                    continue
+                visited_fragments.add(key)
+            walk(fragment_type, fragment.selection_set, matching_types, depth + 1)
+
+    walk(root_type, selection_set, object_types(root_type), 1)
+    return tuple(fields)

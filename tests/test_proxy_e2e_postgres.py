@@ -62,14 +62,18 @@ async def make_run(session):
     return run, snapshot, other_run
 
 
+@pytest.mark.parametrize("query", [
+    "query Fetch($withName: Boolean!) { user { id name @include(if: $withName) } }",
+    "query Fetch($withName: Boolean!) { user { ...UserFields ...UserFields } } "
+    "fragment UserFields on User { id ... @include(if: $withName) { name } }",
+])
 async def test_real_ast_analyzer_http_to_postgres_to_coverage(
-    postgres_session, http_client, upstream, monkeypatch,
+    postgres_session, http_client, upstream, monkeypatch, query,
 ):
     run, snapshot, other_run = await make_run(postgres_session)
     monkeypatch.setattr(app, "state", State({"coverage_analyzer": analyze_e2e_query}))
     upstream(lambda request: raw_response(200, b'{"data":{"user":{"id":"u1"}}}'))
 
-    query = "query Fetch($withName: Boolean!) { user { id name @include(if: $withName) } }"
     response = await http_client.post(
         "/graphql",
         json={"query": query, "operationName": "Fetch", "variables": {"withName": False}},
@@ -90,6 +94,8 @@ async def test_real_ast_analyzer_http_to_postgres_to_coverage(
     assert graph["summary"] == {"totalFields": 3, "coveredFields": 2, "coveragePercent": 66.67}
     fields = {(t["name"], f["name"]): f["covered"] for t in graph["types"] for f in t["fields"]}
     assert fields == {("Query", "user"): True, ("User", "id"): True, ("User", "name"): False}
+    hits = {(t["name"], f["name"]): f["hits"] for t in graph["types"] for f in t["fields"]}
+    assert hits == {("Query", "user"): 1, ("User", "id"): 1, ("User", "name"): 0}
     other_graph = (await http_client.get(f"/api/runs/{other_run.id}/coverage")).json()
     assert other_graph["summary"]["coveredFields"] == 0
 

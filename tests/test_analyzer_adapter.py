@@ -21,13 +21,13 @@ async def test_production_adapter_uses_snapshot_and_directive_variables():
     assert result.fields == (FieldReference("Query", "user"), FieldReference("User", "id"))
 
 
-async def test_production_adapter_keeps_unsupported_fragments_empty():
+async def test_production_adapter_expands_fragments_against_the_snapshot():
     result = await analyze_e2e_query(
-        GraphQLQueryInput(query="query { user { ... on User { id } } }"),
+        GraphQLQueryInput(query="query { user { ...UserId } } fragment UserId on User { ... { id } }"),
         SCHEMA_SDL,
     )
-    assert result.status == "unsupported"
-    assert result.fields == ()
+    assert result.status == "success"
+    assert result.fields == (FieldReference("Query", "user"), FieldReference("User", "id"))
 
 
 def test_schema_cache_is_bounded_and_does_not_mix_snapshots():

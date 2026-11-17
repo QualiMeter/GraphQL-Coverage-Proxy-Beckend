@@ -16,8 +16,9 @@ HTTP-прокси направляет запросы в выбранный се
   и ограниченные очищенные сведения об upstream GraphQL-ошибках.
 - Swagger `/docs`, OpenAPI `/openapi.json`, `/health` для проверки процесса.
 
-Поддерживаются HTTP POST и анализ query/mutation. Fragments, subscriptions и
-нестандартные execution directives не дают покрытия; batching, WebSocket и
+Поддерживаются HTTP POST и анализ query/mutation с именованными и inline
+фрагментами, включая интерфейсы, union и директивы `@skip`/`@include`.
+Subscriptions и нестандартные execution directives не дают покрытия; batching, WebSocket и
 потоковая доставка не поддерживаются. Привязки обращения к E2E test case нет.
 
 ## Архитектура

@@ -1,26 +1,31 @@
 import pytest
 from graphql import build_schema
 
+from app import query_analyzer
 from app.contracts import FieldReference, GraphQLQueryInput
 from app.query_analyzer import analyze_query
 
 
 SCHEMA = build_schema(
     """
+    directive @custom on FRAGMENT_DEFINITION | FRAGMENT_SPREAD | INLINE_FRAGMENT
+    interface Node { id: ID! }
+    union SearchResult = User | Order
     type Query {
       user(id: ID!): User
       orders: [Order!]!
+      search: [SearchResult!]!
       health: String!
     }
     type Mutation {
       updateUser(id: ID!, name: String!): User!
     }
-    type User {
+    type User implements Node {
       id: ID!
       name: String!
       orders: [Order!]!
     }
-    type Order {
+    type Order implements Node {
       id: ID!
       total: Int!
     }
@@ -159,18 +164,96 @@ def test_skip_directive_omits_field_and_typename_is_not_counted():
     assert coordinates(result) == {("Query", "user")}
 
 
-@pytest.mark.parametrize(
-    "query",
-    [
-        "query { user(id: \"1\") { ...UserFields } } fragment UserFields on User { id }",
-        "query { user(id: \"1\") { ... on User { id } } }",
-    ],
-)
-def test_fragments_are_explicitly_unsupported_without_partial_coverage(query):
-    result = analyze_query(SCHEMA, GraphQLQueryInput(query=query))
+@pytest.mark.parametrize(("variables", "extra_fields"), [
+    ({"skip": True}, set()),
+    ({"skip": False, "include": False}, {("Order", "total")}),
+    ({"skip": False}, {("User", "name"), ("Order", "total")}),
+])
+def test_nested_fragments_on_union_and_interface_honor_directives_and_aliases(variables, extra_fields):
+    query = """
+        query A { health }
+        query Search($skip: Boolean!, $include: Boolean! = true) {
+          search {
+            __typename
+            ... on User {
+              ...Shared @skip(if: true)
+              ...Shared
+              ...Shared
+            }
+            ... on Order { ...Shared }
+          }
+        }
+        fragment Shared on Node {
+          key: id
+          ...UserDetails @skip(if: $skip)
+          ... on Order @skip(if: $skip) { sum: total }
+        }
+        fragment UserDetails on User {
+          ... @include(if: $include) { display: name }
+          otherKey: id @include(if: false)
+        }
+    """
+    result = analyze_query(SCHEMA, GraphQLQueryInput(query, "Search", variables))
 
+    assert result.status == "success"
+    assert result.operation_name == "Search"
+    assert coordinates(result) == {("Query", "search"), ("Node", "id")} | extra_fields
+    assert len(result.fields) == len(coordinates(result))
+
+
+def test_nested_type_conditions_keep_the_narrower_runtime_type():
+    query = """
+        { user(id: "1") { ...Shared } }
+        fragment Shared on Node {
+          id
+          ... on Order { total }
+        }
+    """
+    result = analyze_query(SCHEMA, GraphQLQueryInput(query))
+    assert result.status == "success"
+    assert coordinates(result) == {("Query", "user"), ("Node", "id")}
+
+
+@pytest.mark.parametrize("query", [
+    "{ health user(id: \"1\") { ...Missing } }",
+    "{ health user(id: \"1\") { ...A } } fragment A on User { ...B } fragment B on User { ...A }",
+    "{ health user(id: \"1\") { ... on Order { total } } }",
+])
+def test_invalid_fragment_documents_return_no_partial_coverage(query):
+    result = analyze_query(SCHEMA, GraphQLQueryInput(query))
+    assert result.status == "validation_error"
+    assert result.error_code == "GRAPHQL_VALIDATION_ERROR"
+    assert result.fields == ()
+
+
+@pytest.mark.parametrize(("selection", "fragment"), [
+    ("...Details @custom", "fragment Details on User { id }"),
+    ("...Details", "fragment Details on User @custom { id }"),
+    ("... on User @custom { id }", ""),
+])
+def test_custom_fragment_directives_return_no_partial_coverage(selection, fragment):
+    query = '{ health user(id: "1") { ' + selection + ' } } ' + fragment
+    result = analyze_query(SCHEMA, GraphQLQueryInput(query))
     assert result.status == "unsupported"
     assert result.error_code == "UNSUPPORTED_SELECTION"
+    assert result.fields == ()
+
+
+def test_deep_fragment_chain_returns_no_partial_coverage():
+    fragments = " ".join(f"fragment F{i} on Query {{ ...F{i + 1} }}" for i in range(65))
+    query = "{ health ...F0 } " + fragments + " fragment F65 on Query { orders { total } }"
+    result = analyze_query(SCHEMA, GraphQLQueryInput(query))
+    assert result.status == "unsupported"
+    assert result.error_code == "ANALYSIS_LIMIT_EXCEEDED"
+    assert result.fields == ()
+
+
+def test_fragment_visit_limit_discards_fields_collected_before_the_limit(monkeypatch):
+    monkeypatch.setattr(query_analyzer, "MAX_SELECTION_VISITS", 3)
+    query = '{ health user(id: "1") { ...Fields } } fragment Fields on User { id name }'
+    result = analyze_query(SCHEMA, GraphQLQueryInput(query))
+    assert result.status == "unsupported"
+    assert result.error_code == "ANALYSIS_LIMIT_EXCEEDED"
     assert result.fields == ()
 
 
