@@ -105,12 +105,12 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
 
     operation_type = operation.operation.value
     operation_name = operation.name.value if operation.name is not None else None
-    if operation_type == "subscription":
+    if operation_type == "subscription" or _has_unsupported_directive(operation):
         return AnalysisResult(
             status="unsupported",
             operation_type=operation_type,
             operation_name=operation_name,
-            error_code="UNSUPPORTED_OPERATION_TYPE",
+            error_code="UNSUPPORTED_OPERATION_TYPE" if operation_type == "subscription" else "UNSUPPORTED_SELECTION",
         )
 
     validation_errors = validate(schema, document)
@@ -152,7 +152,6 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
         if isinstance(definition, FragmentDefinitionNode)
     }
     try:
-        _check_directives(operation)
         for variable in operation.variable_definitions or ():
             _check_directives(variable)
         fields = _collect_fields(schema, root_type, operation.selection_set, fragments, variable_values)
@@ -171,8 +170,12 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
     )
 
 
+def _has_unsupported_directive(node) -> bool:
+    return any(directive.name.value not in {"skip", "include"} for directive in node.directives or ())
+
+
 def _check_directives(node) -> None:
-    if any(directive.name.value not in {"skip", "include"} for directive in node.directives or ()):
+    if _has_unsupported_directive(node):
         raise _UnsupportedDirective
 
 
