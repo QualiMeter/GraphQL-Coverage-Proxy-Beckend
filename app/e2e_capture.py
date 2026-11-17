@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.graphql_errors import ErrorSummary, error_count, response_envelope, sanitize_errors
 from app.schema_work import schema_work
+from app.field_evidence import match_field_evidence
 from app.diagnostics import diagnostic_run, internal_failure
 from app.contracts import AnalysisResult, GraphQLQueryInput, RequestObservationInput
 from app.safe_document import SafeDocument, normalize_document
@@ -135,6 +136,7 @@ async def capture_e2e_exchange(
     except Exception:
         # Never emit upstream exceptions; CancelledError still propagates.
         pass
+    evidence = await schema_work(match_field_evidence, analysis, payload)
     return await record_observation(
         session,
         RequestObservationInput(
@@ -145,6 +147,7 @@ async def capture_e2e_exchange(
             response_has_data=response_has_data,
             graphql_has_errors=graphql_has_errors,
             graphql_errors=summary,
+            field_evidence=evidence,
             duration_ms=duration_ms,
             query_hash=query_hash,
             safe_document=safe_document,

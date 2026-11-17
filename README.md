@@ -166,6 +166,7 @@ Raw query, runtime variables, секретные headers и response bodies не
 [История и журнал](docs/frontend-history-requests.md) ·
 [Статистика, AST и schema metadata](docs/frontend-final-features.md) ·
 [GraphQL error details](docs/graphql-error-details.md) ·
+[Selected vs observed fields](docs/field-evidence.md) ·
 [E2E-интеграция](docs/e2e-integration.md).
 
 ## Запуск E2E через GitLab

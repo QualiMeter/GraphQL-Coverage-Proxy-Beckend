@@ -12,6 +12,7 @@ AnalysisStatus = Literal[
     "success", "parse_error", "validation_error", "unsupported", "internal_error"
 ]
 OperationType = Literal["query", "mutation", "subscription"]
+EvidenceState = Literal["observed", "not_observed", "indeterminate", "unavailable"]
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,36 @@ class FieldReference:
 
     type_name: str
     field_name: str
+
+
+@dataclass(frozen=True)
+class SelectionScope:
+    """In-memory response object plan, shared with the fragments traversal.
+
+    possible_types are concrete schema object names. Fields retain their static
+    schema coordinate; applicable_types is the intersection of type conditions
+    at this object level. Never persist this plan (aliases are client input).
+    """
+
+    possible_types: frozenset[str]
+    fields: tuple["PlannedField", ...] = ()
+
+
+@dataclass(frozen=True)
+class PlannedField:
+    coordinate: FieldReference | None  # None only for __typename
+    response_key: str
+    applicable_types: frozenset[str]
+    child: SelectionScope | None = None
+    # Number of GraphQL list wrappers; non-null wrappers are irrelevant to
+    # presence. Zero means an object, one a list of objects.
+    list_depth: int = 0
+
+
+@dataclass(frozen=True)
+class FieldEvidence:
+    field: FieldReference
+    state: EvidenceState
 
 
 @dataclass(frozen=True)
@@ -40,6 +71,7 @@ class AnalysisResult:
     paths: tuple[tuple[FieldReference, ...], ...] = ()
     max_depth: int | None = None
     error_code: str | None = None
+    selection_plan: SelectionScope | None = None
 
 
 @dataclass(frozen=True)
@@ -54,3 +86,4 @@ class RequestObservationInput:
     query_hash: str | None = None
     safe_document: SafeDocument = field(default_factory=SafeDocument)
     graphql_errors: ErrorSummary = field(default_factory=ErrorSummary)
+    field_evidence: tuple[FieldEvidence, ...] | None = None

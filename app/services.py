@@ -20,7 +20,7 @@ from app.contracts import FieldReference, RequestObservationInput
 from app.auth_models import ServiceGrant
 from app.models import (
     GitLabPipeline, GraphQLService, ObservedRequest, QueryPath, QueryPathField,
-    RequestPathUsage, RequestFieldUsage, SchemaField,
+    RequestFieldEvidence, RequestPathUsage, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
 )
 from app.schema_metadata import schema_metadata, root_types, argument_metadata, abstract_metadata
@@ -460,7 +460,18 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
         path_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         canonical_paths[path_hash] = path
 
+    evidence = observation.field_evidence
+    if evidence is not None:
+        from app.field_evidence import STATES
+        selected = set(analysis.fields)
+        if (analysis.status != "success" or len(evidence) != len(selected)
+                or {item.field for item in evidence} != selected
+                or any(item.state not in STATES for item in evidence)
+                or (any(item.state == "observed" for item in evidence) and observation.response_has_data is not True)):
+            raise InvalidReferenceError("Invalid field evidence")
+
     row = ObservedRequest(
+        field_evidence_version=1 if evidence is not None else None,
         run_id=observation.run_id,
         operation_name=analysis.operation_name,
         operation_type=analysis.operation_type,
@@ -516,6 +527,13 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
             RequestPathUsage(request_id=row.id, path_id=path_ids[path_hash])
             for path_hash in canonical_paths
         ])
+    if evidence is not None:
+        # Flush FK parents before a single batched evidence INSERT. All three
+        # entities still commit together under the same run/finish lock.
+        await session.flush()
+        session.add_all(RequestFieldEvidence(request_id=row.id,
+            field_id=field_ids[(item.field.type_name, item.field.field_name)], state=item.state)
+            for item in evidence)
     await session.commit()
     return row.id
 

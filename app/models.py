@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -134,6 +135,7 @@ class ObservedRequest(Base):
             AND octet_length(graphql_error_details::text) <= 16384
             AND graphql_has_errors IS NOT NULL AND graphql_has_errors = (graphql_error_count > 0))
             """, name="valid_graphql_error_details"),
+        CheckConstraint("field_evidence_version IS NULL OR field_evidence_version = 1", name="valid_field_evidence_version"),
         Index("ix_requests_run_created_id", "run_id", "created_at", "id"),
         Index("ix_requests_run_duration_id", "run_id", "duration_ms", "id"),
         Index("ix_requests_run_operation_key", "run_id", "operation_key", "created_at", "id",
@@ -150,6 +152,8 @@ class ObservedRequest(Base):
         CheckConstraint("duration_ms IS NULL OR duration_ms >= 0", name="nonnegative_duration"),
         CheckConstraint("max_depth IS NULL OR max_depth BETWEEN 0 AND 64", name="valid_analysis_max_depth"),
     )
+
+    field_evidence_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
@@ -240,6 +244,22 @@ class RequestPathUsage(Base):
     path_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("query_paths.id", ondelete="RESTRICT"), primary_key=True, index=True,
     )
+
+
+class RequestFieldEvidence(Base):
+    __tablename__ = "request_field_evidence"
+    __table_args__ = (
+        ForeignKeyConstraint(["request_id", "field_id"],
+                             ["request_field_usage.request_id", "request_field_usage.field_id"],
+                             ondelete="CASCADE"),
+        CheckConstraint("state IN ('observed', 'not_observed', 'indeterminate', 'unavailable')",
+                        name="valid_evidence_state"),
+        Index("ix_field_evidence_field_state", "field_id", "state"),
+    )
+
+    request_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    field_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
 # Register additive auth models for Alembic metadata and application imports.

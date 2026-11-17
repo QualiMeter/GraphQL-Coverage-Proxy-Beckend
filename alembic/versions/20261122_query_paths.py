@@ -6,7 +6,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision = "20261122_query_paths"
-down_revision = "20261121_gitlab_pipelines"
+down_revision = "20261122_field_evidence"
 branch_labels = None
 depends_on = None
 
