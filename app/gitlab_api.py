@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.access import require_role
 from app.api_models import ApiModel
 from app.auth import Principal, current_principal, visibility_kwargs
+from app.contracts import RunStatus
 from app.database import get_session_factory
 from app.diagnostics import internal_failure
 from app.gitlab_client import GitLabClient, GitLabError
@@ -56,7 +57,7 @@ class PipelineOut(ApiModel):
     pipeline_id: int | None
     pipeline_url: str | None
     pipeline_status: str
-    run_status: str
+    run_status: RunStatus
     error_code: str | None
     created_at: datetime
     finished_at: datetime | None

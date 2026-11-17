@@ -53,7 +53,7 @@ Content-Type: application/json
 | Query | Правило |
 |---|---|
 | `snapshotId`, `serviceId` | UUID; ровно один из двух, иначе 422 |
-| `status` | Необязательно; `running` или `completed`; omission включает все исторические статусы, в том числе legacy `failed` |
+| `status` | Необязательно; `running`, `completed` или `failed`; omission включает все статусы |
 | `from`, `to` | Необязательные ISO-8601 timestamps с секундами и timezone; `[from,to)` по startedAt; при обеих границах from < to |
 | `limit` | Необязательно, 1–500. **Отсутствие limit возвращает все совпадения**, включая legacy snapshotId; скрытого ограничения нет |
 | `offset` | От 0, default 0; без limit пропускает первые offset и возвращает остаток |
@@ -202,3 +202,13 @@ writers; сначала миграция, затем новая версия bac
 Локальные проверки: `TEST_DATABASE_URL=<isolated-postgres> pytest`; миграции
 проверяются на PostgreSQL, SQLite не используется. Полный workflow дополнительно
 проверяет PostgreSQL 16 и Nginx → Docker → Uvicorn cookie/CSRF smoke.
+
+Фильтр `status=failed` работает вместе с `serviceId` или `snapshotId`, датами и
+`limit`/`offset`; `X-Total-Count` считает все совпадения до пагинации. В failed
+входят отказавшие запуски и неполный GitLab-сбор по deadline (подробности состояния
+pipeline доступны через GitLab API с отдельными правами).
+
+RequestDetail не хранит сырые GraphQL body и variables. Поле
+`safeGraphqlDocument` может содержать безопасный нормализованный документ:
+исходные секреты и значения аргументов не раскрываются. Исторические документы
+могут быть unavailable; исходный запрос из них не восстанавливается.

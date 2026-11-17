@@ -269,6 +269,7 @@ async def post_run(payload: RunCreate, session: AsyncSession = Session,
 
 @router.get("/runs", response_model=list[RunOut], responses=TOTAL_RESPONSE,
             description="Exactly one snapshotId or serviceId. UTC [from,to), startedAt DESC/id DESC. "
+                        "Status accepts running, completed or failed. "
                         "Omitted limit returns all matches for legacy compatibility. Metadata only for admin/CLI.")
 async def get_runs(
     response: Response, filters: Annotated[RunFilters, Query()],
@@ -410,7 +411,9 @@ async def get_requests(
 
 @router.get("/runs/{run_id}/requests/{request_id}", response_model=RequestDetailOut,
             responses={404: {"description": "Run/request not found, inaccessible or mismatched"}},
-            description="Journal permissions apply. Real selected fields of this run's snapshot; no GraphQL document or bodies stored/reconstructed.")
+            description="Journal permissions apply. Real selected fields of this run's snapshot. "
+                        "Raw GraphQL bodies and variables are never stored. A safe normalized document "
+                        "may be stored as safeGraphqlDocument; original secrets and argument values are never exposed.")
 async def get_request(
     run_id: uuid.UUID, request_id: uuid.UUID, session: AsyncSession = Session,
     principal: Principal = Depends(require_analyst),

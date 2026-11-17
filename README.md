@@ -152,7 +152,11 @@ hostname. Redirects, environment proxies и retries отключены. Browser 
 CSRF и внутренние coverage headers upstream не получает. Лимиты proxy:
 request 1 MiB, response 8 MiB, decoded analysis 1 MiB, обмен 30 с, 16 слотов/worker.
 
-Raw query, runtime variables, секретные headers и response bodies не хранятся.
+Raw query, GraphQL body, runtime variables, секретные headers и response bodies
+не хранятся. В RequestDetail может сохраняться безопасный нормализованный
+`safeGraphqlDocument`, без исходных секретов и значений аргументов.
+История `/api/runs` поддерживает фильтр `status=running|completed|failed` вместе
+с service/snapshot scope и пагинацией.
 Разрешены masked AST и allowlisted error metadata только в защищённом detail.
 Сохранённый SDL — отдельные данные схемы и может содержать author defaults;
 публичность снимка следует выбирать с учётом его содержимого.
@@ -176,3 +180,5 @@ Raw query, runtime variables, секретные headers и response bodies не
 Для текущего стенда `GITLAB_COVERAGE_URL=https://graphql.rebyte.fun`: QA добавляет
 `/graphql` к базовому URL. В других развёртываниях он может включать префикс
 reverse proxy.
+
+Результаты исправлений независимого аудита Sol и измерения: [отчёт](docs/sol-audit-fixes.md).
