@@ -202,6 +202,7 @@ async def test_additive_migration_preserves_historical_error_flags(isolated_data
         after = (await conn.execute(text('SELECT to_jsonb(r) FROM observed_requests r ORDER BY id'))).scalars().all()
     for old, new in zip(before, after):
         assert new.pop('field_evidence_version') is None
+        assert new.pop('max_depth') is None
         assert new.pop('graphql_error_count') is None
         assert new.pop('graphql_error_details') is None
         assert new.pop('graphql_error_details_availability') == 'unavailable'
