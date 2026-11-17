@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from graphql import (
     GraphQLError,
+    GraphQLCompositeType,
     GraphQLIncludeDirective,
     GraphQLObjectType,
     GraphQLSchema,
@@ -19,7 +20,6 @@ from graphql.language import (
     FieldNode,
     FragmentDefinitionNode,
     FragmentSpreadNode,
-    InlineFragmentNode,
     OperationDefinitionNode,
     SelectionNode,
     SelectionSetNode,
@@ -180,7 +180,6 @@ def _check_directives(node) -> None:
 
 
 def _selection_is_included(selection: SelectionNode, variables) -> bool:
-    _check_directives(selection)
     skip = get_directive_values(GraphQLSkipDirective, selection, variables)
     if skip is not None and skip["if"]:
         return False
@@ -197,25 +196,31 @@ def _collect_fields(
 ) -> tuple[FieldReference, ...]:
     fields: dict[FieldReference, None] = {}
     visited_fragments: set[tuple[str, frozenset[GraphQLObjectType]]] = set()
-    possible_types: dict[str, frozenset[GraphQLObjectType]] = {}
-    visits = 0
+    object_types_by_name: dict[str, frozenset[GraphQLObjectType]] = {}
+    visited_selections = 0
 
-    def object_types(graphql_type):
-        if graphql_type.name not in possible_types:
-            possible_types[graphql_type.name] = (
-                frozenset((graphql_type,)) if isinstance(graphql_type, GraphQLObjectType)
-                else frozenset(schema.get_possible_types(graphql_type))
-            )
-        return possible_types[graphql_type.name]
+    def possible_objects(graphql_type: GraphQLCompositeType) -> frozenset[GraphQLObjectType]:
+        if graphql_type.name not in object_types_by_name:
+            if isinstance(graphql_type, GraphQLObjectType):
+                object_types_by_name[graphql_type.name] = frozenset({graphql_type})
+            else:
+                object_types_by_name[graphql_type.name] = frozenset(schema.get_possible_types(graphql_type))
+        return object_types_by_name[graphql_type.name]
 
-    def walk(parent_type, selections, candidates, depth):
-        nonlocal visits
+    def walk(
+        parent_type: GraphQLCompositeType,
+        selections: SelectionSetNode,
+        possible_parent_objects: frozenset[GraphQLObjectType],
+        depth: int,
+    ) -> None:
+        nonlocal visited_selections
         if depth > MAX_SELECTION_DEPTH:
             raise _AnalysisLimitExceeded
         for selection in selections.selections:
-            visits += 1
-            if visits > MAX_SELECTION_VISITS:
+            visited_selections += 1
+            if visited_selections > MAX_SELECTION_VISITS:
                 raise _AnalysisLimitExceeded
+            _check_directives(selection)
             if not _selection_is_included(selection, variables):
                 continue
 
@@ -227,31 +232,27 @@ def _collect_fields(
                 if selection.selection_set is not None:
                     child_type = get_named_type(parent_type.fields[field_name].type)
                     if is_composite_type(child_type):
-                        walk(child_type, selection.selection_set, object_types(child_type), depth + 1)
+                        walk(child_type, selection.selection_set, possible_objects(child_type), depth + 1)
                 continue
 
-            if isinstance(selection, InlineFragmentNode):
-                fragment = selection
-            else:
-                fragment = fragments[selection.name.value]
-            condition = fragment.type_condition
-            fragment_type = parent_type if condition is None else schema.get_type(condition.name.value)
-            # Nested conditions narrow the runtime object even when the inner
-            # fragment's declared type is broader than the surrounding type.
-            matching_types = candidates
+            spread_name = selection.name.value if isinstance(selection, FragmentSpreadNode) else None
+            fragment = fragments[spread_name] if spread_name is not None else selection
+            type_condition = fragment.type_condition
+            fragment_type = parent_type if type_condition is None else schema.get_type(type_condition.name.value)
+            matching_objects = possible_parent_objects
             if fragment_type is not parent_type:
-                matching_types = candidates & object_types(fragment_type)
-                if not matching_types:
+                # Retain the restriction from the outer fragment as well.
+                matching_objects = possible_parent_objects & possible_objects(fragment_type)
+                if not matching_objects:
                     continue
-            if isinstance(selection, FragmentSpreadNode):
+            if spread_name is not None:
                 _check_directives(fragment)
-                # Deduplicate repeated spreads without dropping other possible
-                # runtime types when the same fragment is used elsewhere.
-                key = (selection.name.value, matching_types)
-                if key in visited_fragments:
+                # The same spread can select different fields on other object types.
+                fragment_visit = (spread_name, matching_objects)
+                if fragment_visit in visited_fragments:
                     continue
-                visited_fragments.add(key)
-            walk(fragment_type, fragment.selection_set, matching_types, depth + 1)
+                visited_fragments.add(fragment_visit)
+            walk(fragment_type, fragment.selection_set, matching_objects, depth + 1)
 
-    walk(root_type, selection_set, object_types(root_type), 1)
+    walk(root_type, selection_set, possible_objects(root_type), 1)
     return tuple(fields)
