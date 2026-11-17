@@ -33,7 +33,7 @@ from app.models import (
     TestRun,
 )
 from app.schema_cache import schema_from_sdl
-from app.schema_work import schema_work
+from app.schema_work import comparison_work
 from app.services import NotFoundError, counted_observation
 
 
@@ -198,8 +198,8 @@ _STATUSES = ("success", "parse_error", "validation_error", "unsupported", "inter
 
 
 async def compare_run_series(data: ComparisonData, payload: RunComparisonRequest) -> RunComparisonResponse:
-    """Use the shared bounded worker capacity, after the DB snapshot is released."""
-    return await schema_work(_build_run_comparison, data, payload)
+    """Use isolated, bounded comparison capacity after releasing the DB snapshot."""
+    return await comparison_work(_build_run_comparison, data, payload)
 
 
 def _build_run_comparison(data: ComparisonData, payload: RunComparisonRequest) -> RunComparisonResponse:

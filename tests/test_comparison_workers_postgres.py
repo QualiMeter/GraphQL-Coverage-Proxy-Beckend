@@ -11,7 +11,7 @@ from app import api, run_comparison
 from app.database import get_session_factory
 from app.main import app
 from app.schema_cache import schema_from_sdl
-from app.schema_work import MAX_SCHEMA_WORKERS
+from app.schema_work import MAX_COMPARISON_WORKERS
 from app.services import create_run, create_service, finish_run, import_sdl
 from test_multi_service_postgres import isolated_database  # noqa: F401
 
@@ -64,7 +64,7 @@ async def test_wide_comparison_releases_snapshot_before_bounded_cpu_work(isolate
             with mutex:
                 active += 1
                 peak = max(peak, active)
-                if active == MAX_SCHEMA_WORKERS:
+                if active == MAX_COMPARISON_WORKERS:
                     loop.call_soon_threadsafe(full.set)
             try:
                 assert release.wait(20), 'HTTP loop could not progress while comparison was computing'
@@ -87,7 +87,7 @@ async def test_wide_comparison_releases_snapshot_before_bounded_cpu_work(isolate
             assert engine.sync_engine.pool.checkedout() == 0
             health = await asyncio.wait_for(client.get('/health'), 2)
             assert health.status_code == 200
-            assert peak == MAX_SCHEMA_WORKERS
+            assert peak == MAX_COMPARISON_WORKERS
             # Five batched SELECTs per comparison; SHOW statements are test-only.
             assert sum(q.lstrip().startswith('SELECT') for q in queries) == 4 * 5 + 1
             assert sum(q.startswith('SET TRANSACTION') for q in queries) == 4
@@ -102,7 +102,7 @@ async def test_wide_comparison_releases_snapshot_before_bounded_cpu_work(isolate
             assert data['fieldCategories']['stillUncovered'] == 45001
             assert all(r['totalFields'] == 45001 and r['coveredFields'] == 0
                        and r['totalRequests'] == 0 and r['coveragePercent'] == 0 for r in data['runs'])
-        assert peak <= MAX_SCHEMA_WORKERS
+        assert peak <= MAX_COMPARISON_WORKERS
     finally:
         release.set()
         await asyncio.gather(*tasks, return_exceptions=True)
