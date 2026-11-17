@@ -49,6 +49,22 @@ def raw_response(status=200, body=b'{"data":{"ok":true}}', headers=()):
     return httpx.Response(status, stream=httpx.ByteStream(body), headers=headers)
 
 
+async def test_swagger_request_body_and_example_are_executable(client, upstream):
+    schema = (await client.get("/openapi.json")).json()
+    body = schema["paths"]["/graphql"]["post"]["requestBody"]
+    assert body["required"] is True
+    media = body["content"]["application/json"]
+    assert media["schema"]["required"] == ["query"]
+    assert set(media["schema"]["properties"]) == {"query", "variables", "operationName"}
+    assert media["example"] == {"query": "{ __typename }"}
+    assert "SwaggerUIBundle" in (await client.get("/docs")).text
+    requests = upstream(lambda request: raw_response(body=b'{"data":{"__typename":"Query"}}'))
+    response = await client.post("/graphql", json=media["example"])
+    assert response.json() == {"data": {"__typename": "Query"}}
+    assert requests[0].content == b'{"query":"{ __typename }"}'
+    assert requests[0].headers["content-type"] == "application/json"
+
+
 @pytest.mark.parametrize("operation", [
     'query GetUser($id: ID!) { user(id: $id) { id } }',
     'mutation GetUser($id: ID!) { updateUser(id: $id) { id } }',

@@ -142,7 +142,17 @@ def trusted_e2e_cookies(request: Request, principal: Principal) -> bool:
     502: {"description": "Upstream/capture failure; request may have executed, never retry automatically"},
     503: {"description": "Storage, destination policy, DNS or outbound capacity unavailable"},
     504: {"description": "Upstream timeout; request may have executed"},
-}, openapi_extra={"parameters": [{"name": "X-Coverage-Run-Id", "in": "header", "required": False,
+}, openapi_extra={"requestBody": {
+    "required": True,
+    "content": {"application/json": {
+        "schema": {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string", "description": "GraphQL document"},
+            "variables": {"type": "object", "additionalProperties": True},
+            "operationName": {"type": "string"},
+        }},
+        "example": {"query": "{ __typename }"},
+    }},
+}, "parameters": [{"name": "X-Coverage-Run-Id", "in": "header", "required": False,
     "description": "Required UUID of a running run; determines service upstream. Only explicit legacy CLI mode permits omission.",
     "schema": {"type": "string", "format": "uuid"}}]},
     description="Routes through run → snapshot → service.endpointUrl. Original body is forwarded unchanged. "

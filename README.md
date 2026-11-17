@@ -166,3 +166,11 @@ Raw query, runtime variables, секретные headers и response bodies не
 [Статистика, AST и schema metadata](docs/frontend-final-features.md) ·
 [GraphQL error details](docs/graphql-error-details.md) ·
 [E2E-интеграция](docs/e2e-integration.md).
+
+## Запуск E2E через GitLab
+
+Защищённый запуск пайплайнов, выбор ветки, фоновое отслеживание, настройки
+сервера и примеры для фронтенда: [руководство](docs/gitlab-e2e.md).
+Для текущего стенда `GITLAB_COVERAGE_URL=https://graphql.rebyte.fun`: QA добавляет
+`/graphql` к базовому URL. В других развёртываниях он может включать префикс
+reverse proxy.
