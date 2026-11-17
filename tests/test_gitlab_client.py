@@ -60,6 +60,27 @@ async def test_launch_sends_exact_ci_variables_and_header_token(config, gitlab_h
     assert TOKEN not in repr(config) + caplog.text
 
 
+@pytest.mark.parametrize("base_url,graphql_url", [
+    ("https://graphql.rebyte.fun", "https://graphql.rebyte.fun/graphql"),
+    ("https://graphql.rebyte.fun/", "https://graphql.rebyte.fun/graphql"),
+    ("https://coverage.example/coverage", "https://coverage.example/coverage/graphql"),
+    ("https://coverage.example/team/proxy/", "https://coverage.example/team/proxy/graphql"),
+])
+async def test_configured_base_url_reaches_qa_without_losing_proxy_prefix(
+    monkeypatch, gitlab_http, base_url, graphql_url,
+):
+    monkeypatch.setenv("GITLAB_ENABLED", "true")
+    monkeypatch.setenv("GITLAB_HOST", "https://gitlab.example")
+    monkeypatch.setenv("GITLAB_TOKEN", TOKEN)
+    monkeypatch.setenv("GITLAB_SERVICE_PROJECTS", json.dumps({str(SERVICE): 123}))
+    monkeypatch.setenv("GITLAB_COVERAGE_URL", base_url)
+    requests = gitlab_http(lambda request: httpx.Response(201, json=data()))
+    await GitLabClient(gitlab_settings()).launch(123, "main", uuid.uuid4())
+    variables = {v["key"]: v["value"] for v in json.loads(requests[0].content)["variables"]}
+    # Consumer contract: QA appends /graphql to COVERAGE_URL, including its prefix.
+    assert variables["COVERAGE_URL"] + "/graphql" == graphql_url
+
+
 @pytest.mark.parametrize("status,ambiguous", [(400, False), (401, False), (403, False), (404, False),
                                              (422, False), (429, True), (500, True), (503, True), (302, False)])
 async def test_status_errors_are_safe_and_never_retried(status, ambiguous, config, gitlab_http, caplog):

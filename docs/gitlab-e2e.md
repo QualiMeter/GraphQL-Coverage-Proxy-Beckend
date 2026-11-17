@@ -74,10 +74,23 @@ UUID в примере иллюстративны: использовать ре
 | `GITLAB_HOST` | Доверенный HTTPS origin, по умолчанию `https://gitlab.com`; без пути, query, credentials |
 | `GITLAB_TOKEN` | Серверный project/personal access token с `api` scope и ролью, позволяющей запуск выбранных веток и чтение пайплайнов/variables |
 | `GITLAB_SERVICE_PROJECTS` | JSON-привязка `{"<существующий service UUID>":12345}`; числовые project IDs |
-| `GITLAB_COVERAGE_URL` | Доступный runner базовый URL Coverage, например `https://graphql.rebyte.fun/coverage`; без `/graphql`, ключей и query |
+| `GITLAB_COVERAGE_URL` | Доступный runner базовый URL Coverage, для текущего стенда `https://graphql.rebyte.fun`; QA добавляет `/graphql`; без ключей и query |
 | `COVERAGE_MIN_PERCENT` | Порог 0–100, по умолчанию 80 |
 | `GITLAB_POLL_SECONDS` | Интервал 2–300 секунд, по умолчанию 10; ошибки увеличивают паузу до 300 секунд |
 | `GITLAB_MAX_RUN_SECONDS` | Предельное время сбора 60–86400 секунд, по умолчанию 3600 |
+
+Для текущего развёртывания задавать:
+
+```dotenv
+GITLAB_COVERAGE_URL=https://graphql.rebyte.fun
+```
+
+Бэкенд передаёт это значение в `COVERAGE_URL` без завершающего `/`, а QA
+формирует `${COVERAGE_URL}/graphql`: здесь это `https://graphql.rebyte.fun/graphql`.
+Путь `/coverage/` на этом стенде принадлежит frontend, а не API-прокси.
+В другом развёртывании допустим реальный префикс reverse proxy: например,
+`https://coverage.example/team/proxy` → `https://coverage.example/team/proxy/graphql`.
+Префикс должен маршрутизировать также `/api/...`; глобального запрета путей нет.
 
 Настройки читаются через конфигурацию приложения. При включённой интеграции
 некорректная конфигурация не позволяет стартовать процесс без монитора.
@@ -101,6 +114,9 @@ SSRF ради запуска в production.
 - Токену дать минимально необходимую роль и `api` scope, доступ к защищённым
   веткам при необходимости. Права на override pipeline variables также должны
   разрешать этому пользователю передавать переменные запуска.
+  Coverage operator с grant на сервис выбирает ветки привязанного проекта;
+  в GitLab запросы выполняются от серверного токена, а не от GitLab-аккаунта
+  оператора. Поэтому права токена и защита веток проекта задают предел доступа.
 - В `.gitlab-ci.yml` разрешить `CI_PIPELINE_SOURCE == "api"` на уровне workflow
   и jobs. Бэкенд использует `POST /projects/:id/pipeline`, а не trigger endpoint.
 - Читать строго `COVERAGE_RUN_ID`, `COVERAGE_URL`, `COVERAGE_MIN_PERCENT`.
@@ -118,12 +134,30 @@ SSRF ради запуска в production.
 - Quality gate может читать карту уже во время `running`; не ждать `completed`
   внутри пайплайна: прогон завершается после окончания самого пайплайна.
 
-Сверена QA-ветка `feat/qa-platform-and-demo-shop`, commit
-`a7c2115f4fabc014d85ee59ce26de97aa0163178`: модуль `src/coverage_qa/gitlab_ci.py`
-имеет свой синхронный клиент. Он не импортируется бэкендом. На момент сверки CLI
-передавал `COVERAGE_PROXY_URL`/`MIN_COVERAGE`, шаблон использовал fallback `latest`,
-а правила jobs включали source `trigger`. Это точки координации с QA до реальной
-проверки; QA-репозиторий в этом PR не меняется.
+### Состояние совместимости с QA на 17 ноября 2026
+
+Проверены опубликованные исходники QA: `main` на
+`d4920a8b31c55b7940b25357fb4a01d9568768e3` ещё не содержит GitLab-интеграции;
+актуальная ветка `feat/qa-platform-and-demo-shop` —
+[`08f5568e222765400fd3aa1d6117b0aaeef60b15`](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-QA/tree/08f5568e222765400fd3aa1d6117b0aaeef60b15).
+Старые замечания про `COVERAGE_PROXY_URL`/`MIN_COVERAGE`, `latest` и разрешение
+только `trigger` больше не описывают эту версию. Её собственный синхронный
+GitLab-клиент не импортируется бэкендом и не определяет контракт нашего запуска.
+
+| Проверка | Опубликованный QA и оставшаяся зависимость |
+| --- | --- |
+| `CI_PIPELINE_SOURCE=api` | В корневом [`.gitlab-ci.yml`](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-QA/blob/08f5568e222765400fd3aa1d6117b0aaeef60b15/.gitlab-ci.yml) нет запрета `api`; `external-run-gate` требует UUID и **защищённую ветку**. Проверить фактический workflow/jobs именно выбранного GitLab ref, доступ runner и protected variables. Для child pipeline source будет `parent_pipeline`, его также нельзя исключить правилами. |
+| Переменные и UUID | `external-run-gate` читает ровно `COVERAGE_RUN_ID`, `COVERAGE_URL`, `COVERAGE_MIN_PERCENT`. Gate валидирует UUID и соответствие `runId` ответа; fallback на `latest`/IID в этом пути отсутствует. Проверить, что UUID backend без подмены доходит также до E2E и каждого `X-Coverage-Run-Id`, включая child pipeline. |
+| Реальные E2E через прокси | `external-run-gate` только читает готовое покрытие и имеет `needs: []`. Остальные jobs выполняют локальную приёмку, создающую собственные прогоны; `tests/support/coverage_client.py` вызывает create/finish. Нужен отдельный режим, использующий переданный running UUID, `${COVERAGE_URL}/graphql` и не создающий/закрывающий run. Gate должен зависеть от завершения этих E2E и сохранения их запросов, а не запускаться одновременно с ними. |
+| Аутентификация без серверного ключа | [`CoverageQualityGate`](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-QA/blob/08f5568e222765400fd3aa1d6117b0aaeef60b15/src/coverage_qa/gitlab_ci.py) умеет `X-Coverage-Api-Key`, но не login/cookie/CSRF отдельного operator. Реализовать и проверить собственную сессию QA для GraphQL и чтения карты с grant на нужный сервис. Публичное чтение карты не заменяет авторизацию записи. Передача серверного ключа в pipeline недопустима. |
+| GitHub bridge | [`github-bridge.yml`](https://github.com/QualiMeter/GraphQL-Coverage-Proxy-QA/blob/08f5568e222765400fd3aa1d6117b0aaeef60b15/examples/gitlab/github-bridge.yml) требует protected ref и полный `QA_GITHUB_SHA`; backend передаёт только три Coverage-переменные. Для этого варианта администратор должен заранее закрепить проверенный QA SHA в доверенных настройках GitLab. Bridge уже пересылает pipeline variables и ждёт child через `strategy: depend`; проверить их доставку и итог failed/canceled на реальном стенде. При прямом зеркале дополнительный SHA не нужен. |
+| Quality gate и завершение | Gate читает покрытие без ожидания `completed`, что соответствует жизненному циклу backend. Проверить положительный и отрицательный порог на **том же UUID**, сохранение наблюдений, завершение backend после pipeline, отмену и restart. Локальный `graphql-coverage-gate` с `MVP_MIN_PERCENT` и собственным graph-файлом не доказывает покрытие внешнего прогона. |
+
+Полный режим backend-managed E2E с отдельной сессией QA в проверенных исходниках
+ещё не опубликован. До его публикации и совместной проверки это зависимости
+включения интеграции, а не подтверждение сквозной совместимости. Настройки живого
+GitLab-проекта и его CI variables здесь не проверялись. QA-репозиторий в этом PR
+не меняется; реальные пайплайны не запускались.
 
 ## Жизненный цикл и восстановление
 

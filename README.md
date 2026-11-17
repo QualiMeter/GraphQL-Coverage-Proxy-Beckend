@@ -171,3 +171,6 @@ Raw query, runtime variables, секретные headers и response bodies не
 
 Защищённый запуск пайплайнов, выбор ветки, фоновое отслеживание, настройки
 сервера и примеры для фронтенда: [руководство](docs/gitlab-e2e.md).
+Для текущего стенда `GITLAB_COVERAGE_URL=https://graphql.rebyte.fun`: QA добавляет
+`/graphql` к базовому URL. В других развёртываниях он может включать префикс
+reverse proxy.
