@@ -273,3 +273,138 @@ class RunStats(CoverageSummary):
     graphql_error_count: int
     avg_duration_ms: float | None = Field(description="Mean over known durations only; null when none are known.")
     request_timeline: list[RequestTimelineBucket]
+
+
+class ComparisonFieldPage(ApiModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+    filter: Literal[
+        "all", "changed", "newlyCovered", "noLongerCovered", "stillCovered",
+        "stillUncovered", "alwaysCovered", "neverCovered", "intermittentlyCovered",
+    ] = "all"
+    limit: int = Field(default=100, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+class ComparisonTypePage(ApiModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+    limit: int = Field(default=100, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+class RunComparisonRequest(ApiModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+    run_ids: list[uuid.UUID] = Field(min_length=2, max_length=20)
+    baseline_run_id: uuid.UUID
+    target_run_id: uuid.UUID | None = None
+    fields: ComparisonFieldPage = Field(default_factory=ComparisonFieldPage)
+    types: ComparisonTypePage = Field(default_factory=ComparisonTypePage)
+
+    @model_validator(mode="after")
+    def validate_run_selection(self):
+        if len(set(self.run_ids)) != len(self.run_ids):
+            raise ValueError("runIds must not contain duplicates")
+        selected = set(self.run_ids)
+        if self.baseline_run_id not in selected:
+            raise ValueError("baselineRunId must be included in runIds")
+        if self.target_run_id is not None:
+            if self.target_run_id not in selected:
+                raise ValueError("targetRunId must be included in runIds")
+            if self.target_run_id == self.baseline_run_id:
+                raise ValueError("targetRunId must differ from baselineRunId")
+        return self
+
+
+class RunMetricOut(ApiModel):
+    run_id: uuid.UUID
+    name: str
+    status: Literal["completed"]
+    started_at: datetime
+    finished_at: datetime | None
+    total_fields: int
+    covered_fields: int
+    coverage_percent: float
+    total_requests: int
+    counted_requests: int
+    unique_operations: int
+    query_requests: int
+    mutation_requests: int
+    subscription_requests: int
+    http_error_count: int
+    graphql_error_count: int
+    analysis_status_counts: AnalysisStatusCounts
+    avg_duration_ms: float | None
+    p95_duration_ms: float | None
+
+
+class ComparisonDeltaOut(ApiModel):
+    percentage_point_delta: float
+    covered_fields_delta: int
+    requests_delta: int
+    counted_requests_delta: int
+    unique_operations_delta: int
+    http_error_count_delta: int
+    graphql_error_count_delta: int
+    avg_duration_delta_ms: float | None
+    p95_duration_delta_ms: float | None
+    adjacent_coverage_deltas_pp: list[dict[str, Any]]
+    newly_covered: int
+    no_longer_covered: int
+    still_covered: int
+    still_uncovered: int
+    always_covered: int
+    never_covered: int
+    intermittently_covered: int
+
+
+class RunFieldHitsOut(ApiModel):
+    run_id: uuid.UUID
+    hits: int
+
+
+class ComparedFieldOut(ApiModel):
+    type_name: str
+    field_name: str
+    hits_by_run: list[RunFieldHitsOut]
+    covered_run_count: int
+    coverage_frequency_percent: float
+    coverage_transitions: int
+    baseline_to_target: Literal["newlyCovered", "noLongerCovered", "stillCovered", "stillUncovered"]
+    stability: Literal["alwaysCovered", "neverCovered", "intermittentlyCovered"]
+    first_covered_run_id: uuid.UUID | None
+    last_covered_run_id: uuid.UUID | None
+
+
+class TypeRunCoverageOut(ApiModel):
+    run_id: uuid.UUID
+    covered_fields: int
+    coverage_percent: float
+
+
+class ComparedTypeOut(ApiModel):
+    type_name: str
+    root_role: Literal["query", "mutation", "subscription"] | None
+    total_fields: int
+    runs: list[TypeRunCoverageOut]
+
+
+class ComparedFieldPageOut(ApiModel):
+    total: int
+    items: list[ComparedFieldOut]
+
+
+class ComparedTypePageOut(ApiModel):
+    total: int
+    items: list[ComparedTypeOut]
+
+
+class RunComparisonResponse(ApiModel):
+    snapshot_id: uuid.UUID
+    schema_hash: str
+    generated_at: datetime
+    baseline_run_id: uuid.UUID
+    target_run_id: uuid.UUID
+    runs: list[RunMetricOut]
+    comparison: ComparisonDeltaOut
+    field_categories: dict[str, int]
+    fields: ComparedFieldPageOut
+    types: ComparedTypePageOut

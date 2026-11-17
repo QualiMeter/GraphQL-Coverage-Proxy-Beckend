@@ -1,4 +1,4 @@
-"""Presence classification and the plan contract used by the fragments task."""
+"""Presence classification of isolated selection plans."""
 from dataclasses import replace
 
 from graphql import build_schema
@@ -98,8 +98,8 @@ def test_typename_is_in_memory_only_and_never_a_schema_coordinate():
     assert all(f.field_name != '__typename' for f in a.fields)
 
 
-# These plans are the output contract of named/inline fragment expansion. They
-# deliberately do not implement that developer's AST traversal a second time.
+# Isolated matcher fixtures; real AST fragment documents are tested separately
+# in test_fragment_field_evidence.py and through the PostgreSQL proxy pipeline.
 def fragment_plan(*, typename=True, list_depth=1, abstract='Search'):
     types = frozenset({'User', 'Order'})
     fields = [PlannedField(Ref('User', 'name'), 'value', frozenset({'User'})),

@@ -26,7 +26,7 @@ from test_proxy_e2e_postgres import http_client, make_run  # noqa: F401
 from test_graphql_proxy import upstream, raw_response  # noqa: F401
 from test_browser_auth_postgres import auth_context, grant, login, TEST_KEY  # noqa: F401
 from test_multi_service_postgres import isolated_database  # noqa: F401
-from test_field_evidence import SDL, fragment_plan
+from test_field_evidence import SDL
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,20 +104,14 @@ async def test_lists_aliases_directives_no_double_count(query, payload, expected
     assert all(f.selected_hits == 1 and f.selected_request_count == 1 for f in dto.fields)
 
 
-async def test_fragment_adapter_contract_records_different_runtime_types(postgres_session):
-    service = await create_service(postgres_session, 'evidence-' + uuid.uuid4().hex, 'Fragments contract')
+async def test_real_fragment_analyzer_records_different_runtime_types(postgres_session):
+    service = await create_service(postgres_session, 'evidence-' + uuid.uuid4().hex, 'Fragments')
     snapshot = await import_sdl(postgres_session, service.id, SDL)
     run = await create_run(postgres_session, snapshot.id, 'Fragments', {})
-    # Injection models the shared analyzer's forthcoming fragment expansion.
-    # This test does not claim the main AST analyzer currently supports fragments.
-    async def fragments_adapter(request, sdl):
-        return fragment_plan()
-    for objects in ([{'kind': 'User', 'value': None}], [{'value': 'unknown type'}],
-                    [{'kind': 'User', 'value': 'x'}, {'kind': 'Order', 'value': 3}]):
-        await capture_e2e_exchange(postgres_session, run_id=run.id,
-            request_body=b'{"query":"{ search { ... on User { value: name } ... on Order { value: total } } }"}',
-            decoded_response_body=json.dumps({'data': {'search': objects}}).encode(),
-            http_status=200, duration_ms=1, analyzer=fragments_adapter)
+    query = '{ search { kind: __typename ...U ... on Order { sum: total } } } fragment U on User { display: name }'
+    for objects in ([{'kind': 'User', 'display': None}], [{'display': 'unknown type'}],
+                    [{'kind': 'User', 'display': 'x'}, {'kind': 'Order', 'sum': 3}]):
+        await capture(postgres_session, run, {'data': {'search': objects}}, query)
     fields = {f.type_name: f for f in (await get_field_evidence(postgres_session, run.id, EvidenceFilters())).fields}
     assert fields['User'].observed_hits == 2 and fields['User'].indeterminate_count == 1
     assert fields['Order'].observed_hits == fields['Order'].indeterminate_count == fields['Order'].not_observed_count == 1
@@ -154,7 +148,7 @@ async def test_invalid_or_large_response_persists_unavailable(postgres_session, 
 async def test_historical_and_failed_analyzer_have_no_invented_fields(postgres_session):
     run, _, _ = await make_run(postgres_session)
     await capture(postgres_session, run, {'data': {'user': {'name': 'x'}}}, 'not graphql')
-    await capture(postgres_session, run, {'data': {'user': {'id': '1'}}}, '{ user { ... on User { id } } }')
+    await capture(postgres_session, run, {'data': {'user': {'id': '1'}}}, '{ user { ...Missing } }')
     page = await get_field_evidence(postgres_session, run.id, EvidenceFilters())
     assert page.fields == [] and page.selection_unavailable_request_count == page.evidence_unavailable_request_count == 2
 

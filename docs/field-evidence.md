@@ -1,11 +1,9 @@
 # Selected fields and response presence evidence
 
-Status: evidence implementation on top of `main` after PR #33 (`6697fd3`).
-**Depends on the parallel Fragments task for end-to-end named/inline fragments.**
-At implementation time (17 November 2026), that task was local to its developer,
-with no published branch or PR. This change deliberately does not implement a
-second fragment expander. Existing fragment requests still return `unsupported`
-until the shared analyzer traversal is integrated. Do not treat them as zero coverage.
+Integrated with `main` after PR #33 (GitLab E2E), #34 (run comparison) and
+#36 (GraphQL Fragments), base `5e862e7`. Named, nested and inline fragments now
+produce selected coordinates and presence evidence through the same analyzer.
+The former Fragments dependency is resolved; no second fragment expander exists.
 
 ## Semantics
 
@@ -36,39 +34,51 @@ possible type can be observed without a runtime discriminator.
 `__typename` is not persisted as a schema field or included in coverage.
 No query rewriting or automatic `__typename` insertion occurs.
 
-## Shared analyzer contract and Fragments handoff
+## Shared AST traversal and response plan
 
 `AnalysisResult.fields` remains the unique selected schema coordinates.
 The additive `selection_plan: SelectionScope | None` contains:
 
 - `SelectionScope.possible_types`: all possible concrete object types at this level;
-- `SelectionScope.fields`: one entry per AST field occurrence;
+- `SelectionScope.fields`: flattened field occurrences, with repeated named spreads deduplicated within a response object;
 - `PlannedField.coordinate`: static schema coordinate (`None` only for `__typename`);
 - `response_key`: actual JSON key, including alias;
 - `applicable_types`: intersection of fragment type conditions at this object level;
 - `child`: nested scope, with its own possible return types;
 - `list_depth`: number of list wrappers in the field return type.
 
-The existing analyzer populates the plan in its existing `_collect_fields` walk,
-after the existing validation and variable/directive coercion. No AST or schema
-parsing happens in `app/field_evidence.py`. The decoded envelope is reused from
-the existing capture path and matched in a worker thread. The plan, variables,
-aliases and response values are never written to the evidence table.
+The bounded fragment traversal from PR #36 now builds both outputs in one walk,
+after validation and variable coercion. Each fragment intersects its type
+condition with the possible types inherited from every outer fragment, and this
+intersection becomes `applicable_types` on its fields. The static fragment type
+still determines the schema coordinate (e.g. `Node.id`, without inventing hits
+for concrete implementations).
 
-**Integration required from Fragments developer:** extend this same walk to expand
-named/inline fragments once, evaluate directives on fields/spreads/fragments
-using the same coerced variables, carry the intersection of possible concrete
-types into `applicable_types`, keep static coordinate attribution consistent with
-`fields`, and retain explicit `__typename` entries. Do not expand fragments again
-in the matcher. Shared fragment traversal must populate both `fields` and the
-plan; changing just one produces unavailable evidence instead of guessed results.
+Named-spread deduplication is local to a response object and keyed by fragment
+name plus applicable concrete types. Repeated spreads in that object do not
+multiply fields; the same spread at another alias or nested object retains its
+own plan. Unknown/custom directives and complexity errors discard both outputs,
+including any coordinates collected earlier. PR #36 limits are preserved:
+10,000 query tokens, selection depth 64, selection visits 20,000. Every visited
+field/spread in the unified walk consumes the shared visit budget.
 
-Unit tests and PostgreSQL adapter tests cover equivalent expanded plans for
-named/inline fragments, unions, interfaces and mixed object arrays. They are
-contract tests, **not end-to-end AST fragment tests**. The existing analyzer tests
-continue to assert `unsupported` for actual fragment documents. Before declaring
-this task fully ready, integrate that developer's traversal and run the same
-scenarios through real named/inline fragment documents and the real proxy.
+`app/field_evidence.py` parses neither AST nor SDL. It uses the already decoded
+envelope in a worker thread. Matching follows GraphQL merging of selection sets
+for the same response key: an explicitly selected unconditional `__typename`
+can discriminate sibling selections of that same object, including nested lists.
+Only proven applicable parent selections contribute that context; a conditional
+alias cannot identify its own runtime branch. Missing/contradictory runtime type
+information stays indeterminate for conditional coordinates. A common coordinate
+and response key selected across every possible branch can prove presence without
+inventing a concrete runtime type; an explicit typename key covering all branches
+can likewise discriminate those branches. No response values, variables or plans are
+persisted.
+
+Real-document unit and Proxy → Capture → PostgreSQL → Field Evidence API tests
+cover named/nested/inline fragments, repeated spreads across aliases and child
+objects, intersections of type conditions, unions/interfaces, directives/default
+variables, mixed arrays, null, missing runtime type and partial errors. Isolated
+plan fixtures remain only as low-level matcher tests.
 
 ## Persistence and migration
 
@@ -189,20 +199,46 @@ Frontend handoff: display Selected Coverage and Observed Evidence separately;
 show four explicit state counters/badges and the unavailable selection count.
 Never turn indeterminate/unavailable into missing/zero coverage. A zero
 `observedHits` alone is insufficient to assert absence. Do not label observed
-counts as successful resolvers. Historical fields use unavailable, and actual
-fragment documents remain unsupported until the dependency above is integrated.
+counts as successful resolvers. Historical fields use unavailable. Real named/nested/inline fragment documents
+are supported; invalid documents and exceeded analysis limits have no partial
+selected fields or plan and are exposed through the unavailable request counters.
 
 ## Validation
 
-Final local validation: **887 passed**, no skips, on isolated PostgreSQL 18
-(142.97 seconds). This includes 60 new unit cases and 31 new PostgreSQL cases.
+Final validation totals for the integrated branch are recorded in PR #35. Tests
+run against isolated PostgreSQL 18 locally and PostgreSQL 16 in GitHub CI. This includes 60 new unit cases and 31 new PostgreSQL cases.
 Only the existing Starlette TestClient/httpx deprecation warning remains.
 Migration upgrade/downgrade/re-upgrade, `alembic check`, `pip check`, compileall
 and `git diff --check` passed. GitHub CI also verifies PostgreSQL 16.
 
 New tests cover classification, aliases,
-directives/default variables, arrays, repeated coordinates, abstract-type plan
+directives/default variables, arrays, repeated coordinates, real fragment documents and abstract-type plan
 contracts, invalid/large responses, actual proxy byte preservation, privacy,
 historical fallback, endpoint pagination/filters, grants across services, atomic
 rollback on evidence insert failure, and migration upgrade/downgrade/check.
 The full existing suite verifies Schema Coverage and API compatibility.
+
+## Integration acceptance example
+
+For this real document (single object `search: Search`, union `User | Order`):
+
+```graphql
+query Search {
+  search {
+    __typename
+    ... on User { name }
+    ... on Order { total }
+  }
+}
+```
+
+With `{"data":{"search":{"__typename":"User","name":"Alex"}}}` the API
+returns `User.name` with `selectedHits: 1, observedHits: 1`, and `Order.total`
+with `selectedHits: 1, observedHits: 0, notObservedCount: 1`. Neither contributes
+an extra hit for `__typename`. Replacing inline fragments with named fragments
+produces the same persisted evidence and API counters.
+
+PR #34 comparison continues to use the original selected hits, so two runs
+selecting these same coordinates retain equal Schema Coverage even when their
+presence evidence differs. GitLab E2E lifecycle/routes from PR #33 are unchanged.
+No Path / Depth / RelationHits metrics or API have been added.

@@ -38,35 +38,63 @@ class _Matcher:
             if field.child is not None:
                 self.mark(field.child, state, depth + 1)
 
-    def children(self, scope, value, list_depth, depth):
+    def children(self, scope, value, list_depth, depth, peer_scopes=()):
         self.step(depth)
         if list_depth:
             if not isinstance(value, list) or not value:
                 self.mark(scope, "indeterminate", depth + 1)
             else:
                 for item in value:
-                    self.children(scope, item, list_depth - 1, depth + 1)
+                    self.children(scope, item, list_depth - 1, depth + 1, peer_scopes)
         elif isinstance(value, dict):
-            self.match(scope, value, depth + 1)
+            self.match(scope, value, depth + 1, peer_scopes)
         else:
             # A null (including error bubbling), malformed value or a missing
             # parent cannot provide trustworthy evidence about its children.
             self.mark(scope, "indeterminate", depth + 1)
 
-    def match(self, scope: SelectionScope, obj: dict, depth=0):
+    def match(self, scope: SelectionScope, obj: dict, depth=0, peer_scopes=()):
         self.step(depth)
+        scopes = {id(peer): peer for peer in (scope, *peer_scopes)}.values()
         possible = scope.possible_types
+        for peer in scopes:
+            self.step(depth)
+            possible = possible & peer.possible_types
+        if not possible:
+            self.mark(scope, "indeterminate", depth + 1)
+            return
         # Only unconditional __typename selections can discriminate. A branch's
         # alias could name a user field in another branch. Never inspect an
         # unsolicited JSON __typename, nor infer types from user field names.
-        names = [obj[f.response_key] for f in scope.fields
-                 if f.coordinate is None and f.applicable_types == possible and f.response_key in obj]
+        # Identical coordinates/keys can be selected through several type
+        # branches. Their combined applicability may cover the whole object
+        # scope even when no single occurrence is unconditional.
+        presence_types = {}
+        for peer in scopes:
+            for field in peer.fields:
+                self.step(depth)
+                presence_types.setdefault((field.coordinate, field.response_key), set()).update(field.applicable_types)
+        keys = {key for (coordinate, key), types in presence_types.items()
+                if coordinate is None and possible <= types}
+        names = [obj[key] for key in keys if key in obj]
         invalid = any(not isinstance(name, str) or name not in possible for name in names)
         invalid |= len(set(name for name in names if isinstance(name, str))) > 1
         if invalid:
             self.mark(scope, "indeterminate", depth + 1)
             return
         runtime = names[0] if names else (next(iter(possible)) if len(possible) == 1 else None)
+        # GraphQL merges selections sharing a response key. An explicitly
+        # selected discriminator in one occurrence also describes the same
+        # JSON object/list in its siblings. Only proven applicable parents can
+        # contribute keys; conditional aliases cannot identify their own type.
+        child_scopes: dict[str, list[SelectionScope]] = {}
+        for peer in scopes:
+            for field in peer.fields:
+                self.step(depth)
+                applicable = (runtime in field.applicable_types if runtime is not None
+                              else possible <= field.applicable_types)
+                if field.child is not None and applicable:
+                    child_scopes.setdefault(field.response_key, []).append(field.child)
         for field in scope.fields:
             self.step(depth)
             if field.coordinate is None:
@@ -76,8 +104,14 @@ class _Matcher:
                 if field.child is not None:
                     self.mark(field.child, "not_observed", depth + 1)
                 continue
-            if runtime is None and field.applicable_types != possible:
-                self.record(field.coordinate, "indeterminate")
+            if runtime is None and not possible <= field.applicable_types:
+                combined = presence_types[(field.coordinate, field.response_key)]
+                if possible <= combined:
+                    state = "observed" if field.response_key in obj else (
+                        "indeterminate" if self.partial else "not_observed")
+                    self.record(field.coordinate, state)
+                else:
+                    self.record(field.coordinate, "indeterminate")
                 if field.child is not None:
                     self.mark(field.child, "indeterminate", depth + 1)
                 continue
@@ -85,7 +119,8 @@ class _Matcher:
             self.record(field.coordinate, "observed" if present else (
                 "indeterminate" if self.partial else "not_observed"))
             if field.child is not None:
-                self.children(field.child, obj.get(field.response_key), field.list_depth, depth + 1)
+                self.children(field.child, obj.get(field.response_key), field.list_depth, depth + 1,
+                              child_scopes.get(field.response_key, ()))
 
 
 def match_field_evidence(analysis: AnalysisResult, payload: dict | None) -> tuple[FieldEvidence, ...] | None:

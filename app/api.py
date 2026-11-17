@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api_models import (
     CoverageGraph, RequestDetailOut, RequestOut, RunCreate, RunOut, SchemaImport, SchemaIntrospectionImport,
     SchemaOut, SchemaUpdate, SchemaSdlOut, SchemaImportErrorOut, ServiceCreate, ServiceOut, ServiceUpdate,
-    OperationOut, OperationType, RunStats,
+    OperationOut, OperationType, RunComparisonRequest, RunComparisonResponse, RunStats,
 )
 from app.access import require_operator, require_analyst, require_role
 from app.auth import Principal, current_principal, visibility_kwargs
@@ -19,6 +19,7 @@ from app.database import get_session, get_session_factory
 from app.diagnostics import internal_failure
 from app.run_analytics import get_run_stats, list_operations
 from app.evidence_analytics import EvidenceFilters, FieldEvidencePage, get_field_evidence
+from app.run_comparison import RunComparisonError, compare_run_series
 from app.schema_collector import SchemaCollectionError
 from app.schema_work import schema_work
 from app.models import TestRun
@@ -283,6 +284,41 @@ async def get_runs(
         return rows
     except NotFoundError as exc:
         raise api_errors(exc) from exc
+
+
+@router.post(
+    "/runs/compare", response_model=RunComparisonResponse,
+    responses={404: {"description": "Run not found or inaccessible"},
+               409: {"description": "Run is not completed or snapshot mismatch"}},
+    description="Compare 2–20 completed runs for the exact same immutable schema snapshot. "
+                "Aggregates are read-only and use the Coverage Engine eligibility rules.",
+)
+async def post_run_comparison(
+    payload: RunComparisonRequest,
+    request: Request,
+    sessions=Depends(get_session_factory),
+):
+    try:
+        async with sessions() as session:
+            async with session.begin():
+                # Must be the first statement in the transaction, before auth
+                # or aggregate queries establish the repeatable-read snapshot.
+                from sqlalchemy import text
+                await session.execute(text(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                ))
+                principal = await current_principal(request, session)
+                if principal.token is not None:
+                    from app.auth import check_csrf
+                    check_csrf(request, principal)
+                return await compare_run_series(session, payload, principal)
+    except RunComparisonError as exc:
+        return JSONResponse(status_code=409, content={"detail": exc.detail, "code": exc.code})
+    except NotFoundError as exc:
+        raise api_errors(exc) from exc
+    except SQLAlchemyError as exc:
+        internal_failure("run_comparison", exc)
+        raise HTTPException(status_code=503, detail="Run comparison is temporarily unavailable") from None
 
 
 @router.post(
