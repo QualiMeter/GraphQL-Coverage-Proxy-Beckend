@@ -165,6 +165,7 @@ async def get_request_detail(session: AsyncSession, run_id: uuid.UUID, request_i
         .where(RequestFieldUsage.request_id == request_id, TestRun.id == run_id)
         .distinct().order_by(SchemaType.name, SchemaField.name, SchemaField.return_type))).all()
     return RequestDetailOut(**request_out(row).model_dump(),
+        field_evidence_version=row.field_evidence_version,
         safe_graphql_document=row.safe_graphql_document, document_availability=row.document_availability,
         graphql_error_count=row.graphql_error_count,
         graphql_error_details_availability=row.graphql_error_details_availability,

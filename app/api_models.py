@@ -212,6 +212,7 @@ class GraphQLErrorDetailOut(ApiModel):
 
 
 class RequestDetailOut(RequestOut):
+    field_evidence_version: Literal[1] | None = Field(default=None, description="Null for historical/unsupported plans; inspect paginated /field-evidence?requestId=... for states.")
     graphql_error_count: int | None = Field(default=None, ge=0, description="Actual number of upstream error objects, before truncation; null if unknown.")
     graphql_error_details_availability: ErrorDetailsAvailability = "unavailable"
     graphql_error_details: list[GraphQLErrorDetailOut] | None = Field(default=None, max_length=20)
