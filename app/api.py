@@ -18,6 +18,7 @@ from app.upstream import UnsafeEndpoint, validate_endpoint
 from app.database import get_session, get_session_factory
 from app.diagnostics import internal_failure
 from app.run_analytics import get_run_stats, list_operations
+from app.evidence_analytics import EvidenceFilters, FieldEvidencePage, get_field_evidence
 from app.schema_collector import SchemaCollectionError
 from app.schema_work import schema_work
 from app.models import TestRun
@@ -378,5 +379,21 @@ async def get_request(
     try:
         await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
         return await get_request_detail(session, run_id, request_id)
+    except NotFoundError as exc:
+        raise api_errors(exc) from exc
+
+
+@router.get("/runs/{run_id}/field-evidence", response_model=FieldEvidencePage,
+            responses={404: {"description": "Run/request not found or inaccessible"}},
+            description="Journal permissions: analyst/operator with service grant, admin or trusted CLI. "
+                        "Presence evidence is separate from Schema Coverage. Unknown states are not zero coverage. "
+                        "Only selected coordinates are listed; filters combine with AND. State filters require at least one request in that state.")
+async def field_evidence(
+    run_id: uuid.UUID, filters: Annotated[EvidenceFilters, Query()],
+    session: AsyncSession = Session, principal: Principal = Depends(require_analyst),
+):
+    try:
+        await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
+        return await get_field_evidence(session, run_id, filters)
     except NotFoundError as exc:
         raise api_errors(exc) from exc

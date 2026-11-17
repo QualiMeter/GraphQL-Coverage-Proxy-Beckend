@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from graphql import (
     GraphQLError,
+    GraphQLList,
+    GraphQLNonNull,
+    is_abstract_type,
     GraphQLIncludeDirective,
     GraphQLSchema,
     GraphQLSkipDirective,
@@ -20,10 +23,10 @@ from graphql.language import (
     OperationDefinitionNode,
     SelectionSetNode,
 )
-from graphql.type import GraphQLInterfaceType, GraphQLObjectType
+from graphql.type import GraphQLInterfaceType, GraphQLObjectType, GraphQLUnionType
 
 from app.diagnostics import internal_failure
-from app.contracts import AnalysisResult, FieldReference, GraphQLQueryInput
+from app.contracts import AnalysisResult, FieldReference, GraphQLQueryInput, PlannedField, SelectionScope
 
 
 def analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> AnalysisResult:
@@ -137,12 +140,13 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
 
     fields: list[FieldReference] = []
     seen: set[tuple[str, str]] = set()
-    _collect_fields(root_type, operation.selection_set, variable_values, fields, seen)
+    plan = _collect_fields(schema, root_type, operation.selection_set, variable_values, fields, seen)
     return AnalysisResult(
         status="success",
         operation_type=operation_type,
         operation_name=operation_name,
         fields=tuple(fields),
+        selection_plan=plan,
     )
 
 
@@ -182,12 +186,16 @@ def _selection_is_included(selection: FieldNode, variables: dict) -> bool:
 
 
 def _collect_fields(
-    parent_type: GraphQLObjectType | GraphQLInterfaceType,
+    schema: GraphQLSchema,
+    parent_type: GraphQLObjectType | GraphQLInterfaceType | GraphQLUnionType,
     selection_set: SelectionSetNode,
     variables: dict,
     fields: list[FieldReference],
     seen: set[tuple[str, str]],
-) -> None:
+) -> SelectionScope:
+    possible_types = (frozenset(t.name for t in schema.get_possible_types(parent_type))
+                      if is_abstract_type(parent_type) else frozenset({parent_type.name}))
+    planned = []
     for selection in selection_set.selections:
         if not isinstance(selection, FieldNode) or not _selection_is_included(selection, variables):
             continue
@@ -195,6 +203,8 @@ def _collect_fields(
         # Introspection and meta fields are not part of user schema coverage.
         field_name = selection.name.value
         if field_name.startswith("__"):
+            if field_name == "__typename":
+                planned.append(PlannedField(None, (selection.alias or selection.name).value, possible_types))
             continue
 
         coordinate = (parent_type.name, field_name)
@@ -204,8 +214,17 @@ def _collect_fields(
 
         field_definition = parent_type.fields[field_name]
         named_type = get_named_type(field_definition.type)
-        if (
-            selection.selection_set is not None
-            and isinstance(named_type, (GraphQLObjectType, GraphQLInterfaceType))
+        child = None
+        if selection.selection_set is not None and (
+            isinstance(named_type, GraphQLObjectType) or is_abstract_type(named_type)
         ):
-            _collect_fields(named_type, selection.selection_set, variables, fields, seen)
+            child = _collect_fields(schema, named_type, selection.selection_set, variables, fields, seen)
+        wrapper = field_definition.type
+        depth = 0
+        while isinstance(wrapper, (GraphQLList, GraphQLNonNull)):
+            if isinstance(wrapper, GraphQLList):
+                depth += 1
+            wrapper = wrapper.of_type
+        planned.append(PlannedField(FieldReference(*coordinate), (selection.alias or selection.name).value,
+                                    possible_types, child, depth))
+    return SelectionScope(possible_types, tuple(planned))
