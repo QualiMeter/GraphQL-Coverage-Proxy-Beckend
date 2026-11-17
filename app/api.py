@@ -19,7 +19,7 @@ from app.database import get_session, get_session_factory
 from app.diagnostics import internal_failure
 from app.run_analytics import get_run_stats, list_operations
 from app.evidence_analytics import EvidenceFilters, FieldEvidencePage, get_field_evidence
-from app.run_comparison import RunComparisonError, compare_run_series
+from app.run_comparison import RunComparisonError, compare_run_series, load_run_comparison
 from app.schema_collector import SchemaCollectionError
 from app.schema_work import schema_work
 from app.models import TestRun
@@ -311,7 +311,10 @@ async def post_run_comparison(
                 if principal.token is not None:
                     from app.auth import check_csrf
                     check_csrf(request, principal)
-                return await compare_run_series(session, payload, principal)
+                data = await load_run_comparison(session, payload, principal)
+        # Release the repeatable-read snapshot and pool connection before CPU
+        # work, including time queued for the shared worker capacity.
+        return await compare_run_series(data, payload)
     except RunComparisonError as exc:
         return JSONResponse(status_code=409, content={"detail": exc.detail, "code": exc.code})
     except NotFoundError as exc:

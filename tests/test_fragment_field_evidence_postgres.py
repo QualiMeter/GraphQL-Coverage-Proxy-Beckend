@@ -14,7 +14,7 @@ from app.evidence_analytics import EvidenceFilters, get_field_evidence
 from app.main import app
 from app.models import ObservedRequest, RequestFieldEvidence, RequestFieldUsage, SchemaField
 from app.run_analytics import get_run_stats
-from app.run_comparison import compare_run_series
+from app.run_comparison import compare_run_series, load_run_comparison
 from app.services import create_run, create_service, finish_run, get_run_graph, import_sdl, record_observation
 from test_e2e_capture_postgres import postgres_session  # noqa: F401
 from test_graphql_proxy import upstream, raw_response  # noqa: F401
@@ -164,8 +164,9 @@ async def test_pr34_comparison_uses_selected_hits_despite_different_evidence(pos
     run2 = await create_run(postgres_session, snapshot.id, 'Second', {})
     await exchange(http_client, upstream, run2, SEARCH, {'data': {'search': {'__typename': 'User'}}, 'errors': [{}]})
     await finish_run(postgres_session, run2.id)
-    comparison = await compare_run_series(postgres_session, RunComparisonRequest(
-        run_ids=[run1.id, run2.id], baseline_run_id=run1.id, target_run_id=run2.id), Principal(role='admin'))
+    payload = RunComparisonRequest(run_ids=[run1.id, run2.id], baseline_run_id=run1.id, target_run_id=run2.id)
+    data = await load_run_comparison(postgres_session, payload, Principal(role='admin'))
+    comparison = await compare_run_series(data, payload)
     assert comparison.comparison.percentage_point_delta == comparison.comparison.covered_fields_delta == 0
     for run in (run1, run2):
         graph = await get_run_graph(postgres_session, run.id)

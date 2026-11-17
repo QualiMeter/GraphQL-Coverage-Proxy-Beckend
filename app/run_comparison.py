@@ -33,6 +33,7 @@ from app.models import (
     TestRun,
 )
 from app.schema_cache import schema_from_sdl
+from app.schema_work import schema_work
 from app.services import NotFoundError, counted_observation
 
 
@@ -79,12 +80,16 @@ def _round(value):
     return round(float(value), 2) if value is not None else None
 
 
-async def compare_run_series(
+async def load_run_comparison(
     session: AsyncSession,
     payload: RunComparisonRequest,
     principal: Principal,
-) -> RunComparisonResponse:
-    """Aggregate a selected run series without loading requests into Python."""
+) -> "ComparisonData":
+    """Materialize batched scalar rows within the caller's read-only snapshot.
+
+    The caller must close the transaction/session before starting CPU work.
+    No ORM objects, sessions, connections or lazy results escape this phase.
+    """
     selected_ids = payload.run_ids
     statement = (
         select(
@@ -121,13 +126,6 @@ async def compare_run_series(
     ):
         raise RunComparisonError("RUN_NOT_COMPLETED", "All selected runs must be completed")
 
-    by_id = {run.id: run for run in runs}
-    baseline = by_id[payload.baseline_run_id]
-    target_id = payload.target_run_id
-    if target_id is None:
-        target_id = next(run.id for run in reversed(runs) if run.id != baseline.id)
-    target = by_id[target_id]
-
     snapshot = _SnapshotRow(
         id=selected[0]["snapshot_uuid"], schema_hash=selected[0]["schema_hash"],
         schema_sdl=selected[0]["schema_sdl"],
@@ -152,11 +150,6 @@ async def compare_run_series(
                SchemaType.snapshot_id == snapshot.id, SchemaType.kind == "OBJECT")
         .group_by(RequestFieldUsage.field_id, ObservedRequest.run_id)
     )).mappings().all()
-    hits_by_field: dict[uuid.UUID, dict[uuid.UUID, int]] = {}
-    for row in hit_rows:
-        hits_by_field.setdefault(row["field_id"], {})[row["run_id"]] = row["hits"]
-
-    statuses = ("success", "parse_error", "validation_error", "unsupported", "internal_error")
     request_metric_rows = (await session.execute(
         select(
             ObservedRequest.run_id,
@@ -168,14 +161,13 @@ async def compare_run_series(
             func.percentile_cont(0.95).within_group(ObservedRequest.duration_ms)
                 .filter(ObservedRequest.duration_ms.is_not(None)).label("p95_duration_ms"),
             *[func.count().filter(ObservedRequest.analysis_status == status).label(status)
-              for status in statuses],
+              for status in _STATUSES],
             *[func.count().filter(ObservedRequest.operation_type == operation).label(f"{operation}_requests")
               for operation in ("query", "mutation", "subscription")],
         )
         .where(ObservedRequest.run_id.in_(selected_ids))
         .group_by(ObservedRequest.run_id)
     )).mappings().all()
-    request_metrics = {row["run_id"]: row for row in request_metric_rows}
 
     operation_identities = (
         select(ObservedRequest.run_id)
@@ -189,8 +181,45 @@ async def compare_run_series(
         select(operation_identities.c.run_id, func.count().label("unique_operations"))
         .group_by(operation_identities.c.run_id)
     )).all()
-    unique_operations: dict[uuid.UUID, int] = {run_id: 0 for run_id in selected_ids}
-    for row in operation_rows:
+    return ComparisonData(runs, snapshot, field_rows, hit_rows, request_metric_rows, operation_rows)
+
+
+@dataclass(frozen=True)
+class ComparisonData:
+    runs: list[_RunRow]
+    snapshot: _SnapshotRow
+    field_rows: list
+    hit_rows: list
+    request_metric_rows: list
+    operation_rows: list
+
+
+_STATUSES = ("success", "parse_error", "validation_error", "unsupported", "internal_error")
+
+
+async def compare_run_series(data: ComparisonData, payload: RunComparisonRequest) -> RunComparisonResponse:
+    """Use the shared bounded worker capacity, after the DB snapshot is released."""
+    return await schema_work(_build_run_comparison, data, payload)
+
+
+def _build_run_comparison(data: ComparisonData, payload: RunComparisonRequest) -> RunComparisonResponse:
+    runs, snapshot = data.runs, data.snapshot
+    field_rows, hit_rows = data.field_rows, data.hit_rows
+    statuses = _STATUSES
+    by_id = {run.id: run for run in runs}
+    baseline = by_id[payload.baseline_run_id]
+    target_id = payload.target_run_id
+    if target_id is None:
+        target_id = next(run.id for run in reversed(runs) if run.id != baseline.id)
+    target = by_id[target_id]
+
+    hits_by_field: dict[uuid.UUID, dict[uuid.UUID, int]] = {}
+    for row in hit_rows:
+        hits_by_field.setdefault(row["field_id"], {})[row["run_id"]] = row["hits"]
+
+    request_metrics = {row["run_id"]: row for row in data.request_metric_rows}
+    unique_operations = {run.id: 0 for run in runs}
+    for row in data.operation_rows:
         unique_operations[row.run_id] = row.unique_operations
 
     total_by_type: dict[str, int] = {}
