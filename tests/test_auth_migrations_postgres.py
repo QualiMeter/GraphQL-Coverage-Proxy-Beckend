@@ -45,7 +45,7 @@ async def test_auth_migration_preserves_existing_services_snapshots_runs_and_obs
 
         async def history():
             async with engine.connect() as connection:
-                return [await connection.scalar(text(f"SELECT jsonb_agg(to_jsonb(t) - 'endpoint_url' - 'description' - 'updated_at' - 'operation_key' - 'display_name' - 'safe_graphql_document' - 'document_availability' - 'graphql_error_count' - 'graphql_error_details_availability' - 'graphql_error_details' - 'field_evidence_version' - 'test_execution_id') FROM {table} t"))
+                return [await connection.scalar(text(f"SELECT jsonb_agg(to_jsonb(t) - 'endpoint_url' - 'description' - 'updated_at' - 'operation_key' - 'display_name' - 'safe_graphql_document' - 'document_availability' - 'graphql_error_count' - 'graphql_error_details_availability' - 'graphql_error_details' - 'field_evidence_version' - 'test_execution_id' - 'max_depth') FROM {table} t"))
                         for table in ("graphql_services", "schema_snapshots", "test_runs", "observed_requests")]
         before = await history()
         await migrate("upgrade", "head")
@@ -59,6 +59,7 @@ async def test_auth_migration_preserves_existing_services_snapshots_runs_and_obs
             assert await connection.scalar(text("SELECT display_name FROM schema_snapshots")) is None
             assert await connection.scalar(text("SELECT safe_graphql_document FROM observed_requests")) is None
             assert await connection.scalar(text("SELECT document_availability FROM observed_requests")) == "unavailable"
+            assert await connection.scalar(text("SELECT max_depth FROM observed_requests")) is None
             assert await connection.scalar(text("SELECT endpoint_url FROM graphql_services")) is None
             assert await connection.scalar(text("SELECT description FROM graphql_services")) is None
             assert await connection.scalar(text("SELECT updated_at = created_at FROM graphql_services")) is True

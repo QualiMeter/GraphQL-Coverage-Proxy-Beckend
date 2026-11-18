@@ -3,7 +3,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "20261124_test_executions"
-down_revision = "20261123_incomplete_collection"
+down_revision = "20261122_query_paths"
 branch_labels = None
 depends_on = None
 
