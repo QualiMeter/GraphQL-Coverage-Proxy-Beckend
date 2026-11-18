@@ -1,7 +1,8 @@
-"""Bounded GitLab v4 requests, with no redirects, retries or caller-selected origins."""
+"""Bounded GitLab v4 requests with read-only retries and no redirects."""
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlsplit
@@ -30,6 +31,9 @@ class PipelineInfo:
 
 COMMIT_SHA_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 JOBS_PAGE_SIZE = 50
+GET_ATTEMPTS = 3
+REQUEST_BUDGET_SECONDS = 15
+GET_ATTEMPT_BUDGET_SECONDS = 4.5
 
 
 @dataclass(frozen=True)
@@ -67,8 +71,40 @@ class GitLabClient:
         self.settings = settings
 
     async def request(self, method: str, path: str, *, params=None, payload=None):
+        if method != "GET":
+            # Pipeline creation can have succeeded even when the response was
+            # lost. Never replay a mutation.
+            return await self._request_once(method, path, params=params, payload=payload)
+
+        # Retrying a read is safe, but multiple full HTTP timeouts would exceed
+        # the API and background monitor budgets. Include DNS, TCP, TLS, body
+        # and backoff in one deadline. Revalidate DNS/SSRF for every attempt.
+        deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
+        last_error = GitLabError("gitlab_network_error")
+        for attempt in range(GET_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                async with asyncio.timeout(min(GET_ATTEMPT_BUDGET_SECONDS, remaining)):
+                    return await self._request_once(method, path, params=params, payload=payload)
+            except TimeoutError:
+                last_error = GitLabError("gitlab_network_error")
+            except GitLabError as exc:
+                # Do not retry authorization, validation, policy, or HTTP
+                # errors (including rate limiting). Only transient transport
+                # failures qualify.
+                if exc.code != "gitlab_network_error":
+                    raise
+                last_error = exc
+            if attempt + 1 < GET_ATTEMPTS:
+                await asyncio.sleep(min(0.15 * (2**attempt),
+                                        max(0, deadline - time.monotonic())))
+        raise last_error
+
+    async def _request_once(self, method: str, path: str, *, params=None, payload=None):
         try:
-            async with asyncio.timeout(15):
+            async with asyncio.timeout(REQUEST_BUDGET_SECONDS):
                 destination = await validate_endpoint(self.settings.host + "/api/v4/" + path)
                 async with httpx.AsyncClient(
                     transport=PinnedTransport(destination), trust_env=False,
