@@ -1,7 +1,7 @@
 from typing import Literal
 
 from pydantic import Field, model_validator
-from sqlalchemy import and_, case, distinct, func, select
+from sqlalchemy import and_, case, distinct, func, literal, select, true
 
 from app.api_models import ApiModel
 from app.models import ObservedRequest, RequestFieldEvidence, RequestFieldUsage, SchemaField, SchemaType, TestExecution
@@ -96,7 +96,7 @@ async def group_coverage(session, run, filters: GroupPageFilters):
     )).where(ObservedRequest.run_id == run.id, SchemaType.snapshot_id == run.snapshot_id,
              ObservedRequest.analysis_status == "success", *conditions).group_by(group_key).cte("group_fields")
     keys = select(attempts.c.key).union(select(requests.c.key)).cte("group_keys")
-    total = await session.scalar(select(func.count()).select_from(keys))
+    total = select(func.count().label("total")).select_from(keys).subquery()
     total_fields = await session.scalar(select(func.count()).select_from(SchemaField).join(
         SchemaType, SchemaType.id == SchemaField.type_id
     ).where(SchemaType.snapshot_id == run.snapshot_id, SchemaType.kind.in_(COVERAGE_KINDS)))
@@ -105,10 +105,15 @@ async def group_coverage(session, run, filters: GroupPageFilters):
     statement = select(keys.c.key, *columns).select_from(keys)
     for table in (attempts, requests, fields):
         statement = statement.outerjoin(table, keys.c.key.is_not_distinct_from(table.c.key))
-    rows = (await session.execute(statement.order_by(keys.c.key.asc().nullsfirst())
-                                  .limit(filters.limit).offset(filters.offset))).mappings()
+    page = statement.add_columns(literal(True).label("present")).order_by(
+        keys.c.key.asc().nullsfirst(),
+    ).limit(filters.limit).offset(filters.offset).subquery()
+    # A single MVCC snapshot keeps the count and page consistent during capture.
+    rows = (await session.execute(select(total.c.total, *page.c).select_from(total).outerjoin(
+        page, true(),
+    ).order_by(page.c.key.asc().nullsfirst()))).mappings().all()
     return [
         GroupCoverage(**row, total_fields=total_fields,
                       coverage_percent=round(row["covered_field_count"] * 100 / total_fields, 2) if total_fields else 0)
-        for row in rows
-    ], total
+        for row in rows if row["present"]
+    ], rows[0]["total"]

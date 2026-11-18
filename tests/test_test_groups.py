@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.main import app
-from app.test_executions import ExecutionCreate
+from app.test_executions import ExecutionCreate, ExecutionFilters
 
 
 @pytest.mark.parametrize("key", ["", " ", " team", "team\nsecret", "x" * 129, "\ud800"])
@@ -19,3 +19,8 @@ def test_group_routes_and_filters_are_documented():
     assert route in paths
     parameters = {p["name"] for p in paths[route]["get"]["parameters"]}
     assert {"groupBy", "teamKey", "suiteKey", "unassignedTeam", "unassignedSuite"} <= parameters
+
+
+def test_group_filter_offset_fits_postgres_bigint():
+    with pytest.raises(ValidationError):
+        ExecutionFilters(suiteKey="smoke", offset=2**63)

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import and_, case, distinct, exists, func, select, update
+from sqlalchemy import and_, case, distinct, exists, func, select, true, update
 from sqlalchemy.exc import IntegrityError
 
 from app.api_models import ApiModel
@@ -65,7 +65,7 @@ class ExecutionFilters(GroupFilters):
     field_name: str | None = Field(default=None, min_length=1, max_length=255)
     field_mode: Literal["covered", "selected", "observed"] = "covered"
     limit: int = Field(default=100, ge=1, le=500)
-    offset: int = Field(default=0, ge=0)
+    offset: int = Field(default=0, ge=0, le=2**63 - 1)
 
     @model_validator(mode="after")
     def field_scope(self):
@@ -309,9 +309,13 @@ async def execution_fields(session, run_id, execution_id, limit=100, offset=0, *
         statement = statement.outerjoin(TestExecution, TestExecution.id == ObservedRequest.test_execution_id)
         statement = statement.where(*group_conditions(groups))
     statement = statement.group_by(SchemaType.id, SchemaType.name, SchemaType.kind, SchemaField.id, SchemaField.name)
-    total = await session.scalar(select(func.count()).select_from(statement.subquery()))
-    rows = (await session.execute(statement.order_by(SchemaType.name, SchemaField.name).limit(limit).offset(offset))).mappings().all()
-    return [ExecutionFieldOut(**row) for row in rows], total
+    fields = statement.cte("execution_fields")
+    total = select(func.count().label("total")).select_from(fields).subquery()
+    page = select(fields).order_by(fields.c.type_name, fields.c.field_name).limit(limit).offset(offset).subquery()
+    rows = (await session.execute(select(total.c.total, *page.c).select_from(total).outerjoin(
+        page, true(),
+    ).order_by(page.c.type_name, page.c.field_name))).mappings().all()
+    return [ExecutionFieldOut(**row) for row in rows if row["field_name"] is not None], rows[0]["total"]
 
 
 async def coverage_summary(session, run_id):

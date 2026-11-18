@@ -83,9 +83,60 @@ async def test_empty_groups_and_tests_without_requests(context):
     assert row["requestCount"] == row["coveragePercent"] == row["observedFieldCount"] == 0
     assert (await client.get(path, params={"suiteKey": "unknown"})).json() == []
     assert (await client.get(path, params={"offset": 100})).json() == []
+    fields = await client.get(f"/api/runs/{run_id}/test-coverage/fields", params={"offset": 100})
+    assert fields.json() == [] and fields.headers["X-Total-Count"] == "0"
     for params in ({"teamKey": "x", "unassignedTeam": True}, {"groupBy": "invalid"},
                    {"offset": 2**63}, {"limit": 501}):
         assert (await client.get(path, params=params)).status_code == 422
+
+
+async def test_count_and_group_page_agree_during_registration(context, monkeypatch):
+    from app.test_executions import get_run
+    from app.test_groups import GroupPageFilters, group_coverage
+    client, sessions, run_id, _ = context
+    await register(client, run_id)
+    async with sessions() as session:
+        run = await get_run(session, uuid.UUID(run_id))
+        scalar = session.scalar
+        registered = False
+
+        async def register_between_reads(*args, **kwargs):
+            nonlocal registered
+            result = await scalar(*args, **kwargs)
+            if not registered:
+                registered = True
+                await register(client, run_id, test_id="another", suite="regression")
+            return result
+
+        monkeypatch.setattr(session, "scalar", register_between_reads)
+        rows, total = await group_coverage(session, run, GroupPageFilters())
+        assert total == len(rows) == 2
+
+
+async def test_count_and_field_page_agree_during_capture(context, monkeypatch):
+    from app.test_executions import execution_fields
+    from app.test_groups import GroupFilters
+    client, sessions, run_id, _ = context
+    execution, _ = await register(client, run_id)
+    assert (await exchange(client, run_id, execution["id"], "{ user { id } }")).status_code == 200
+    async with sessions() as session:
+        execute = session.execute
+        captured = False
+
+        async def capture_before_page(*args, **kwargs):
+            nonlocal captured
+            if not captured:
+                captured = True
+                assert (await exchange(client, run_id, execution["id"])).status_code == 200
+            return await execute(*args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", capture_before_page)
+        rows, total = await execution_fields(
+            session, uuid.UUID(run_id), None, groups=GroupFilters(suite_key="smoke"),
+        )
+        assert total == len(rows) == 3
+    page = await client.get(f"/api/runs/{run_id}/test-coverage/fields", params={"offset": 100})
+    assert page.json() == [] and page.headers["X-Total-Count"] == "3"
 
 
 async def test_same_suite_in_other_snapshot_does_not_change_group_coverage(context):
