@@ -201,6 +201,7 @@ async def test_additive_migration_preserves_historical_error_flags(isolated_data
     async with engine.connect() as conn:
         after = (await conn.execute(text('SELECT to_jsonb(r) FROM observed_requests r ORDER BY id'))).scalars().all()
     for old, new in zip(before, after):
+        assert new.pop('argument_usage_version') is None
         assert new.pop('test_execution_id') is None
         assert new.pop('field_evidence_version') is None
         assert new.pop('max_depth') is None

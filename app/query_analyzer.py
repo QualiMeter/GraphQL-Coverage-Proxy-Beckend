@@ -25,9 +25,11 @@ from graphql.language import (
     OperationDefinitionNode,
     SelectionNode,
     SelectionSetNode,
+    NullValueNode,
+    VariableNode,
 )
 
-from app.contracts import AnalysisResult, FieldReference, GraphQLQueryInput, PlannedField, SelectionScope
+from app.contracts import ArgumentUsage, AnalysisResult, FieldReference, GraphQLQueryInput, PlannedField, SelectionScope
 from app.diagnostics import internal_failure
 
 
@@ -35,6 +37,8 @@ MAX_QUERY_TOKENS = 10_000
 MAX_SELECTION_DEPTH = 64
 MAX_SELECTION_VISITS = 20_000
 MAX_PATHS_PER_REQUEST = 5_000
+MAX_ARGUMENTS_PER_REQUEST = 5_000
+MAX_ARGUMENT_VISITS = 20_000
 
 
 class _UnsupportedDirective(Exception):
@@ -67,7 +71,7 @@ def analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysis
 def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> AnalysisResult:
     if not isinstance(request.query, str) or not request.query.strip():
         return AnalysisResult(status="parse_error", error_code="EMPTY_QUERY")
-    if not isinstance(request.variables, dict):
+    if request.variables is not None and not isinstance(request.variables, dict):
         return AnalysisResult(status="validation_error", error_code="INVALID_VARIABLES")
 
     try:
@@ -128,15 +132,19 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
     variable_values = get_variable_values(
         schema,
         operation.variable_definitions or (),
-        request.variables,
+        request.variables or {},
     )
-    if isinstance(variable_values, list):
-        return AnalysisResult(
-            status="validation_error",
-            operation_type=operation_type,
-            operation_name=operation_name,
-            error_code="INVALID_VARIABLES",
-        )
+    invalid_variables = isinstance(variable_values, list) or request.variables is None
+    # A coercion error never becomes selected-field coverage. Argument syntax
+    # can still be classified, conservatively treating every variable as unknown.
+    # graphql-core 3.2 returns a dict; 3.3 returns VariableValues with
+    # .coerced and .sources. Directives need the original version-native
+    # object, while argument nullness reads only the coerced mapping.
+    argument_variables = None if invalid_variables else getattr(variable_values, "coerced", variable_values)
+    if invalid_variables:
+        # Both versions accept None for unavailable variables. A bare dict
+        # would break 3.3 directive coercion instead of yielding GraphQLError.
+        variable_values = None
 
     root_type = (
         schema.query_type if operation_type == "query" else schema.mutation_type
@@ -157,9 +165,14 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
     try:
         for variable in operation.variable_definitions or ():
             _check_directives(variable)
-        fields, plan, paths, max_depth = _collect_fields(
-            schema, root_type, operation.selection_set, fragments, variable_values,
+        fields, plan, paths, max_depth, arguments = _collect_fields(
+            schema, root_type, operation.selection_set, fragments, variable_values, argument_variables,
         )
+    except GraphQLError:
+        # Runtime directive conditions could not be resolved. Do not guess which
+        # fields were selected, or record omitted/provided for skipped branches.
+        return AnalysisResult(status="validation_error", operation_type=operation_type,
+                              operation_name=operation_name, error_code="INVALID_VARIABLES")
     except (_UnsupportedDirective, _AnalysisLimitExceeded) as exc:
         return AnalysisResult(
             status="unsupported",
@@ -167,6 +180,10 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
             operation_name=operation_name,
             error_code="UNSUPPORTED_SELECTION" if isinstance(exc, _UnsupportedDirective) else "ANALYSIS_LIMIT_EXCEEDED",
         )
+    if invalid_variables:
+        return AnalysisResult(status="validation_error", operation_type=operation_type,
+                              operation_name=operation_name, error_code="INVALID_VARIABLES",
+                              arguments=arguments)
     return AnalysisResult(
         status="success",
         operation_type=operation_type,
@@ -175,6 +192,7 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
         paths=paths,
         max_depth=max_depth,
         selection_plan=plan,
+        arguments=arguments,
     )
 
 
@@ -201,11 +219,13 @@ def _collect_fields(
     selection_set: SelectionSetNode,
     fragments: dict[str, FragmentDefinitionNode],
     variables,
+    argument_variables,
 ) -> tuple[
     tuple[FieldReference, ...],
     SelectionScope,
     tuple[tuple[FieldReference, ...], ...],
     int | None,
+    tuple[ArgumentUsage, ...] | None,
 ]:
     """Collect unique coordinates, a response plan, and bounded canonical paths."""
     fields: dict[FieldReference, None] = {}
@@ -214,6 +234,9 @@ def _collect_fields(
     visited_selections = 0
     max_depth = 0
     paths_available = True
+    arguments_available = True
+    argument_visits = 0
+    argument_states: dict[tuple[FieldReference, str], str] = {}
 
     def possible_objects(graphql_type: GraphQLCompositeType) -> frozenset[GraphQLObjectType]:
         if graphql_type.name not in object_types_by_name:
@@ -231,7 +254,7 @@ def _collect_fields(
         parent_path: tuple[FieldReference, ...],
         visited_fragments: set[tuple[str, frozenset[GraphQLObjectType]]],
     ) -> tuple[PlannedField, ...]:
-        nonlocal visited_selections, max_depth, paths_available
+        nonlocal visited_selections, max_depth, paths_available, arguments_available, argument_visits
         if selection_depth > MAX_SELECTION_DEPTH:
             raise _AnalysisLimitExceeded
         planned: list[PlannedField] = []
@@ -265,6 +288,34 @@ def _collect_fields(
                         paths[path] = None
                 max_depth = max(max_depth, len(path))
                 definition = parent_type.fields[field_name]
+                if arguments_available:
+                    supplied = {arg.name.value: arg.value for arg in selection.arguments or ()}
+                    for argument_name in definition.args:
+                        argument_visits += 1
+                        key = (coordinate, argument_name)
+                        if (len(argument_name) > 255 or argument_visits > MAX_ARGUMENT_VISITS
+                                or (key not in argument_states and len(argument_states) >= MAX_ARGUMENTS_PER_REQUEST)):
+                            arguments_available = False
+                            argument_states.clear()
+                            break
+                        node = supplied.get(argument_name)
+                        if node is None:
+                            state = "omitted"
+                        elif isinstance(node, VariableNode):
+                            name = node.name.value
+                            if argument_variables is None:
+                                state = "unknown"
+                            elif name not in argument_variables:
+                                state = "omitted"
+                            else:
+                                state = "explicit_null" if argument_variables[name] is None else "provided"
+                        else:
+                            state = "explicit_null" if isinstance(node, NullValueNode) else "provided"
+                        previous = argument_states.get(key, state)
+                        # Unknown dominates: even a mixed claim would overstate
+                        # certainty. Otherwise differing aliases are one mixed hit.
+                        argument_states[key] = ("unknown" if "unknown" in (previous, state)
+                                                else state if previous == state else "mixed")
                 child = None
                 if selection.selection_set is not None:
                     child_type = get_named_type(definition.type)
@@ -312,4 +363,7 @@ def _collect_fields(
     root_objects = possible_objects(root_type)
     plan = SelectionScope(frozenset(obj.name for obj in root_objects),
                           walk(root_type, selection_set, root_objects, 1, (), set()))
-    return tuple(fields), plan, tuple(paths), max_depth if paths_available else None
+    arguments = (tuple(ArgumentUsage(coordinate, name, state)
+                       for (coordinate, name), state in argument_states.items())
+                 if arguments_available else None)
+    return tuple(fields), plan, tuple(paths), max_depth if paths_available else None, arguments

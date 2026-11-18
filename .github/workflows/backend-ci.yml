@@ -14,6 +14,10 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        graphql_version: ["3.2.*", "3.3.*"]
 
     services:
       postgres:
@@ -46,7 +50,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -e '.[test]' -e integrations/python
+        run: pip install -e '.[test]' -e integrations/python 'graphql-core==${{ matrix.graphql_version }}'
 
       - name: Set up Node for Playwright integration checks
         uses: actions/setup-node@v4

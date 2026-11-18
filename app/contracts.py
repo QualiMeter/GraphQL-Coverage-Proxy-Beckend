@@ -13,6 +13,7 @@ AnalysisStatus = Literal[
 ]
 RunStatus = Literal["running", "completed", "failed"]
 OperationType = Literal["query", "mutation", "subscription"]
+ArgumentState = Literal["omitted", "explicit_null", "provided", "unknown", "mixed"]
 EvidenceState = Literal["observed", "not_observed", "indeterminate", "unavailable"]
 
 
@@ -55,10 +56,19 @@ class FieldEvidence:
 
 
 @dataclass(frozen=True)
+class ArgumentUsage:
+    """Only schema coordinates and a category; never a client value."""
+
+    field: FieldReference
+    argument_name: str
+    state: ArgumentState
+
+
+@dataclass(frozen=True)
 class GraphQLQueryInput:
     query: str
     operation_name: str | None = None
-    variables: dict = field(default_factory=dict)
+    variables: dict | None = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,8 @@ class AnalysisResult:
     max_depth: int | None = None
     error_code: str | None = None
     selection_plan: SelectionScope | None = None
+    # None means unavailable; an empty tuple means collection found no arguments.
+    arguments: tuple[ArgumentUsage, ...] | None = None
 
 
 @dataclass(frozen=True)

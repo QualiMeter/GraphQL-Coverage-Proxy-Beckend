@@ -194,3 +194,6 @@ Raw query, GraphQL body, runtime variables, секретные headers и respon
 reverse proxy.
 
 Результаты исправлений независимого аудита Sol и измерения: [отчёт](docs/sol-audit-fixes.md).
+
+Argument Usage API, persistence model and frontend example:
+[docs/argument-usage.md](docs/argument-usage.md).

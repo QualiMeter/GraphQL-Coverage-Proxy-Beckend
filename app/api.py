@@ -22,6 +22,7 @@ from app.run_analytics import get_run_stats, list_operations
 from app.evidence_analytics import EvidenceFilters, FieldEvidencePage, get_field_evidence
 from app.run_comparison import RunComparisonError, compare_run_series, load_run_comparison
 from app.path_analytics import get_run_paths
+from app.argument_usage import RunArgumentsOut, get_run_arguments
 from app.schema_collector import SchemaCollectionError
 from app.schema_work import schema_work
 from app.models import TestRun
@@ -478,3 +479,30 @@ async def field_evidence(
         return await get_field_evidence(session, run_id, filters)
     except NotFoundError as exc:
         raise api_errors(exc) from exc
+
+
+@router.get(
+    "/runs/{run_id}/arguments", response_model=RunArgumentsOut,
+    responses={404: {"description": "Run not found or inaccessible"}},
+    description="Argument categories per HTTP request, independently of resolver/test outcomes. "
+                "Analyst/operator with service grant, admin or trusted CLI. Filters combine with AND. "
+                "Counts are mutually exclusive: differing known aliases are mixed; uncertainty dominates as unknown. "
+                "Unselected fields do not add omitted hits. unavailable/partial includes historical or failed collection; "
+                "zero counts must not be interpreted as known non-use when availability is unavailable. "
+                "No argument values, variable payloads or schema default values are returned.",
+)
+async def get_arguments(
+    run_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    type_name: str | None = Query(default=None, alias="typeName", min_length=1, max_length=255),
+    field_name: str | None = Query(default=None, alias="fieldName", min_length=1, max_length=255),
+    argument_name: str | None = Query(default=None, alias="argumentName", min_length=1, max_length=255),
+    session: AsyncSession = Session, principal: Principal = Depends(require_analyst),
+):
+    try:
+        await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
+        return await get_run_arguments(session, run_id, limit=limit, offset=offset,
+            type_name=type_name, field_name=field_name, argument_name=argument_name)
+    except NotFoundError as exc:
+        raise api_errors(exc) from None
