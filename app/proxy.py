@@ -240,26 +240,41 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
     allow_cookies = trusted_e2e_cookies(request, principal)
     headers = forwarded_headers(httpx.Headers(request.headers.raw), strip_forwarding=True,
                                 allow_cookies=allow_cookies)
-    if execution_id is not None:
-        try:
-            await admit_request(session, run_id, execution_id)
-        except NotFoundError:
-            raise HTTPException(404, "Test execution not found") from None
-        except ConflictError as exc:
-            raise HTTPException(409, str(exc)) from None
-        except Exception as exc:
-            internal_failure("test_execution_admission", exc, run_id=run_id)
-            raise HTTPException(503, "Test coverage storage is unavailable") from None
+    admitted = False
     try:
+        if run_id is not None:
+            try:
+                # A cancellation at commit/close must not orphan a durable slot.
+                # Finish admission, remember its outcome, then enter cleanup.
+                admission = asyncio.create_task(admit_request(session, run_id, execution_id))
+                cancelled = False
+                while True:
+                    try:
+                        await asyncio.shield(admission)
+                        break
+                    except asyncio.CancelledError:
+                        if admission.cancelled():
+                            raise
+                        cancelled = True
+                admitted = True
+                if cancelled:
+                    raise asyncio.CancelledError
+            except NotFoundError:
+                raise HTTPException(404, "Coverage run or test execution not found") from None
+            except ConflictError as exc:
+                raise HTTPException(409, str(exc)) from None
+            except Exception as exc:
+                internal_failure("test_execution_admission", exc, run_id=run_id)
+                raise HTTPException(503, "Test coverage storage is unavailable") from None
         return await forward_exchange(session, run_id, analyzer, target, destination, body, headers, allow_cookies, execution_id)
     finally:
-        if execution_id is not None:
+        if admitted:
             # Close/rollback capture before a separate session updates the same
             # execution row. Run both steps under one shield so cancellation
             # cannot leave a transaction holding the cleanup's row lock.
             async def close_and_release():
                 await session.close()
-                await release_request(sessions, execution_id)
+                await release_request(sessions, execution_id, run_id=run_id)
 
             cleanup = asyncio.create_task(close_and_release())
             cancelled = False

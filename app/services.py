@@ -383,7 +383,7 @@ async def finish_run(
     pipeline_managed: bool = False, status: str = "completed", commit: bool = True,
 ) -> RunOut:
     # Row locking also prevents a concurrent request from recording after completion.
-    run = await session.scalar(select(TestRun).where(TestRun.id == run_id).with_for_update())
+    run = await session.scalar(select(TestRun).where(TestRun.id == run_id).with_for_update().execution_options(populate_existing=True))
     if run is None:
         raise NotFoundError("Test run not found")
     if run.status != "running":
@@ -392,6 +392,8 @@ async def finish_run(
         raise ConflictError("This run is managed by GitLab and cannot be finished manually")
     if status not in {"completed", "failed"}:
         raise ValueError("Invalid final run status")
+    if run.in_flight_requests:
+        raise ConflictError("Wait for admitted GraphQL requests before finishing the run")
     run.status = status
     run.finished_at = datetime.now(timezone.utc)
     if commit:

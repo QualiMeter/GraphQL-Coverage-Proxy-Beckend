@@ -322,11 +322,11 @@ async def test_repeated_cancellation_during_cleanup_still_releases_slot(context,
     entered, resume = asyncio.Event(), asyncio.Event()
     original = proxy.release_request
 
-    async def delayed_release(sessions, execution_id):
+    async def delayed_release(sessions, execution_id, **kwargs):
         assert sessions.kw['bind'].pool.checkedout() == 0
         entered.set()
         await resume.wait()
-        await original(sessions, execution_id)
+        await original(sessions, execution_id, **kwargs)
 
     monkeypatch.setattr(proxy, 'release_request', delayed_release)
     task = asyncio.create_task(exchange(client, run_id, execution['id']))

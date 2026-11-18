@@ -159,16 +159,17 @@ async def test_finish_while_mutation_waits_preserves_lock_contract(pool_context,
     try:
         await asyncio.wait_for(started.wait(), 3)
         finished = await asyncio.wait_for(context.client.post(f"/api/runs/{context.run.id}/finish", headers=headers), 2)
-        assert finished.status_code == 200
+        assert finished.status_code == 409
         release.set()
         response = await asyncio.wait_for(task, 3)
-        assert response.status_code == 502
-        assert "upstream may have executed" in response.text and "Do not retry automatically" in response.text
+        assert response.status_code == 200
         assert len(calls) == 1
+        finished = await context.client.post(f"/api/runs/{context.run.id}/finish", headers=headers)
+        assert finished.status_code == 200
         async with context.sessions() as session:
             assert (await session.get(Run, context.run.id)).status == "completed"
-            assert await session.scalar(select(func.count()).select_from(ObservedRequest)) == 0
-            assert await session.scalar(select(func.count()).select_from(RequestFieldUsage)) == 0
+            assert await session.scalar(select(func.count()).select_from(ObservedRequest)) == 1
+            assert await session.scalar(select(func.count()).select_from(RequestFieldUsage)) == 1
     finally:
         release.set()
         if not task.done():
@@ -181,11 +182,18 @@ async def test_mutation_commit_failure_never_repeats_upstream(pool_context, monk
     calls = []
     async def upstream(self, request):
         calls.append(request)
+        # Fault the observation commit after admission has durably completed.
+        monkeypatch.setattr(AsyncSession, "commit", fail_commit)
         return raw_response(body=b'{"data":{"change":true}}')
+    real_commit = AsyncSession.commit
+    failed = False
     async def fail_commit(self):
-        raise SQLAlchemyError("private-storage-error")
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise SQLAlchemyError("private-storage-error")
+        return await real_commit(self)
     monkeypatch.setattr(PinnedTransport, "handle_async_request", upstream)
-    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
     response = await context.client.post("/graphql", json={"query": "mutation Save { change }"},
         headers={**context.key_headers, "X-Coverage-Run-Id": str(context.run.id)})
     assert response.status_code == 502 and len(calls) == 1
