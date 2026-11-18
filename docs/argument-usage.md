@@ -169,3 +169,64 @@ privacy of DB/journal/API/logs and unchanged Schema/Test Coverage semantics.
 Use a disposable local PostgreSQL with `TEST_DATABASE_URL`; never production.
 The existing full backend suite also covers GitLab and admission/cleanup
 regressions from #40. Deployment/production smoke tests are outside this task.
+
+## Changed files
+
+| File | Change |
+| --- | --- |
+| `app/query_analyzer.py` | Shared AST traversal classifies, deduplicates and bounds argument categories. |
+| `app/contracts.py` | In-memory value-free ArgumentUsage contract; explicit unavailable-variable marker. |
+| `app/models.py` | RequestArgumentUsage entity and nullable observation collection version. |
+| `app/services.py` | Validate against run snapshot and atomically persist argument rows. |
+| `app/argument_usage.py` | Catalog, category validation, typed API response/example and consistent aggregation. |
+| `app/api.py` | Protected, filtered and paginated GET run arguments route. |
+| `alembic/versions/20261126_argument_usage.py` | Additive migration, constraints, foreign keys and index. |
+| `tests/test_argument_usage.py` | 31 unit/OpenAPI cases. |
+| `tests/test_argument_usage_postgres.py` | 30 PostgreSQL capture/API/privacy/concurrency/migration cases. |
+| `tests/test_auth_migrations_postgres.py` | Historical comparison allows new column and explicitly asserts NULL. |
+| `tests/test_final_features_postgres.py` | Historical safe-document migration asserts nullable argument version. |
+| `tests/test_graphql_error_details_postgres.py` | Historical error metadata migration asserts nullable argument version. |
+| `docs/argument-usage.md` | Semantics, model, API example, limits and verification report. |
+| `docs/frontend-api.md` | Link to the frontend Argument Usage contract. |
+| `README.md` | Link to Argument Usage documentation. |
+
+## Completed verification (18 November 2026)
+
+Final feature code: `a08d708`, based on `main` `8304f7c`. PostgreSQL clusters were
+created specifically for this task under `/tmp/gcp-arguments-pg` (port 55441) and
+`/tmp/gcp-arguments-pg16` (port 55442), with test-only databases/credentials. No
+production connection, migration, merge or deployment was used.
+
+| Check | Result |
+| --- | --- |
+| Full backend suite, PostgreSQL 18 | **1106 passed**, 285.08 s |
+| Full backend suite, PostgreSQL 16 | **1106 passed**, 288.41 s |
+| New tests included above | **31 unit/OpenAPI + 30 PostgreSQL cases** |
+| Standalone Playwright SDK unit suite, Node 22 | **3 passed** |
+| Fresh Alembic upgrade to head, both PostgreSQL versions | Passed |
+| Argument migration downgrade/upgrade + historical row preservation | Passed on both versions within the full suite |
+| `alembic check`, both PostgreSQL versions | No new upgrade operations detected |
+| `python -m pip check` | No broken requirements found |
+| `python -m compileall -q app` | Passed |
+| `git diff --check` | Passed |
+
+Both full runs emitted only the existing Starlette/httpx TestClient deprecation
+warning. The initial full run exposed three historical JSON-row comparisons
+that needed to allow the additive column; those assertions now also explicitly
+verify its historical NULL value. All final runs above are green.
+
+Reproduction (Python 3.12, Node 22; migrate the disposable target first):
+
+```sh
+DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
+python -m pytest -q
+DATABASE_URL="$TEST_DATABASE_URL" alembic check
+node --test integrations/playwright/index.test.cjs
+python -m pip check
+python -m compileall -q app
+git diff --check
+```
+
+Final local full-suite logs are `/tmp/gcp-argument-usage-final-pg18.log` and
+`/tmp/gcp-argument-usage-final-pg16.log`. Production/Docker deployment smoke tests
+were not invoked; the repository CI workflow is unchanged.
