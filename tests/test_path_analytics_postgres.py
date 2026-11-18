@@ -11,6 +11,7 @@ from app.contracts import AnalysisResult, FieldReference, RequestObservationInpu
 from app.models import ObservedRequest
 from app.path_analytics import get_run_paths
 from app.services import create_run, create_service, import_sdl, record_observation
+from test_multi_service_postgres import isolated_database  # noqa: F401
 
 
 @pytest.fixture
@@ -133,3 +134,75 @@ async def test_legacy_requests_report_partial_or_unavailable_path_evidence(postg
     assert mixed.path_data_availability == "partial"
     assert mixed.max_depth == 1
     assert mixed.paths.total == 1
+
+
+@pytest.mark.integration
+async def test_path_limit_preserves_selected_hits_and_response_evidence(postgres_session, monkeypatch):
+    from app import query_analyzer
+    from app.analyzer_adapter import analyze_e2e_query
+    from app.e2e_capture import capture_e2e_exchange
+    from app.services import get_run_graph
+    from sqlalchemy import select
+    from app.models import RequestFieldEvidence
+    service = await create_service(postgres_session, 'limit-' + uuid.uuid4().hex, 'Limit')
+    schema = await import_sdl(postgres_session, service.id, 'type Query { user: User } type User { id: ID }')
+    run = await create_run(postgres_session, schema.id, 'Limit', {})
+    monkeypatch.setattr(query_analyzer, 'MAX_PATHS_PER_REQUEST', 1)
+    await capture_e2e_exchange(postgres_session, run_id=run.id,
+        request_body=b'{"query":"{ user { id } }"}',
+        decoded_response_body=b'{"data":{"user":{"id":"1"}}}',
+        http_status=200, duration_ms=1, analyzer=analyze_e2e_query)
+    graph = await get_run_graph(postgres_session, run.id)
+    assert graph.summary.covered_fields == 2
+    assert all(field.hits == 1 for type_ in graph.types for field in type_.fields)
+    states = (await postgres_session.scalars(select(RequestFieldEvidence.state).join(
+        ObservedRequest, ObservedRequest.id == RequestFieldEvidence.request_id).where(ObservedRequest.run_id == run.id))).all()
+    assert states == ['observed', 'observed']
+    from app.evidence_analytics import EvidenceFilters, get_field_evidence
+    evidence = await get_field_evidence(postgres_session, run.id, EvidenceFilters())
+    assert len(evidence.fields) == 2
+    assert all(field.selected_hits == field.observed_hits == 1 for field in evidence.fields)
+    assert evidence.selection_unavailable_request_count == evidence.evidence_unavailable_request_count == 0
+    analytics = await get_run_paths(postgres_session, run.id)
+    assert analytics.path_data_availability == 'unavailable'
+    assert analytics.max_depth is None and analytics.paths.total == 0
+
+
+@pytest.mark.integration
+async def test_5000_paths_are_batched_deduplicated_and_safe_under_concurrent_writes(isolated_database, record_property):
+    import asyncio
+    from sqlalchemy import event, func, select
+    from app.models import QueryPath, QueryPathField, RequestPathUsage
+    size = 5000
+    fields = tuple(FieldReference('Query', f'f{i}') for i in range(size))
+    async with isolated_database() as session:
+        service = await create_service(session, 'bulk-' + uuid.uuid4().hex, 'Bulk paths')
+        schema = await import_sdl(session, service.id,
+            'type Query { ' + ' '.join(f'f{i}: String' for i in range(size)) + ' }')
+        run = await create_run(session, schema.id, 'Bulk paths', {})
+    item = observation(run.id, fields, tuple((field,) for field in fields), max_depth=1)
+    calls = []
+    engine = isolated_database.kw['bind']
+    def count(conn, cursor, statement, parameters, context, executemany):
+        calls.append(statement)
+    event.listen(engine.sync_engine, 'before_cursor_execute', count)
+    try:
+        async def write():
+            async with isolated_database() as session:
+                return await record_observation(session, item)
+        await asyncio.wait_for(write(), 30)
+        inserts = sum(sql.startswith('INSERT INTO query_paths ') for sql in calls)
+        record_property('query_path_insert_calls', inserts)
+        assert inserts == 5, f'{inserts} path INSERT round trips for {size} paths'
+        assert len(calls) < 100
+        calls.clear()
+        # The run lock serializes capture, while the unique constraint and
+        # ON CONFLICT retain a single dictionary entry per snapshot/path.
+        await asyncio.wait_for(asyncio.gather(write(), write()), 30)
+        assert sum(sql.startswith('INSERT INTO query_paths ') for sql in calls) == 10
+        async with isolated_database() as session:
+            assert await session.scalar(select(func.count()).select_from(QueryPath)) == size
+            assert await session.scalar(select(func.count()).select_from(QueryPathField)) == size
+            assert await session.scalar(select(func.count()).select_from(RequestPathUsage)) == size * 3
+    finally:
+        event.remove(engine.sync_engine, 'before_cursor_execute', count)

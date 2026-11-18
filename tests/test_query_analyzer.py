@@ -354,3 +354,17 @@ def test_missing_operation_name_does_not_persist_untrusted_client_text():
     assert result.error_code == "OPERATION_NOT_FOUND"
     assert result.operation_name is None
     assert result.fields == ()
+
+
+def test_path_limit_preserves_basic_analysis(monkeypatch):
+    from graphql import build_schema
+    from app import query_analyzer
+    schema = build_schema('type Query { user: User } type User { id: ID }')
+    request = GraphQLQueryInput(query='{ user { id } }')
+    normal = analyze_query(schema, request)
+    monkeypatch.setattr(query_analyzer, 'MAX_PATHS_PER_REQUEST', 1)
+    limited = analyze_query(schema, request)
+    assert limited.status == normal.status == 'success'
+    assert limited.fields == normal.fields
+    assert limited.selection_plan == normal.selection_plan
+    assert limited.paths == () and limited.max_depth is None

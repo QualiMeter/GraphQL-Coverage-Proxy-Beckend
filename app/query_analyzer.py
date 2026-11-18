@@ -205,7 +205,7 @@ def _collect_fields(
     tuple[FieldReference, ...],
     SelectionScope,
     tuple[tuple[FieldReference, ...], ...],
-    int,
+    int | None,
 ]:
     """Collect unique coordinates, a response plan, and bounded canonical paths."""
     fields: dict[FieldReference, None] = {}
@@ -213,6 +213,7 @@ def _collect_fields(
     object_types_by_name: dict[str, frozenset[GraphQLObjectType]] = {}
     visited_selections = 0
     max_depth = 0
+    paths_available = True
 
     def possible_objects(graphql_type: GraphQLCompositeType) -> frozenset[GraphQLObjectType]:
         if graphql_type.name not in object_types_by_name:
@@ -230,7 +231,7 @@ def _collect_fields(
         parent_path: tuple[FieldReference, ...],
         visited_fragments: set[tuple[str, frozenset[GraphQLObjectType]]],
     ) -> tuple[PlannedField, ...]:
-        nonlocal visited_selections, max_depth
+        nonlocal visited_selections, max_depth, paths_available
         if selection_depth > MAX_SELECTION_DEPTH:
             raise _AnalysisLimitExceeded
         planned: list[PlannedField] = []
@@ -253,10 +254,15 @@ def _collect_fields(
                 coordinate = FieldReference(parent_type.name, field_name)
                 fields[coordinate] = None
                 path = parent_path + (coordinate,)
-                if path not in paths:
+                if paths_available and path not in paths:
                     if len(paths) >= MAX_PATHS_PER_REQUEST:
-                        raise _AnalysisLimitExceeded
-                    paths[path] = None
+                        # Optional analytics must not invalidate selected fields
+                        # or the response plan. Discard incomplete path data so
+                        # existing availability reporting stays truthful.
+                        paths_available = False
+                        paths.clear()
+                    else:
+                        paths[path] = None
                 max_depth = max(max_depth, len(path))
                 definition = parent_type.fields[field_name]
                 child = None
@@ -306,4 +312,4 @@ def _collect_fields(
     root_objects = possible_objects(root_type)
     plan = SelectionScope(frozenset(obj.name for obj in root_objects),
                           walk(root_type, selection_set, root_objects, 1, (), set()))
-    return tuple(fields), plan, tuple(paths), max_depth
+    return tuple(fields), plan, tuple(paths), max_depth if paths_available else None

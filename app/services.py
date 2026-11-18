@@ -495,19 +495,21 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
     for key in {(item.type_name, item.field_name) for item in analysis.fields}:
         session.add(RequestFieldUsage(request_id=row.id, field_id=field_ids[key]))
     if canonical_paths:
+        # Keep bind counts bounded below asyncpg's limit, and acquire unique
+        # index entries in a stable order across concurrent runs of a snapshot.
+        path_items = sorted(canonical_paths.items())
         new_paths: dict[str, uuid.UUID] = {}
-        for path_hash, path in canonical_paths.items():
-            path_id = uuid.uuid4()
-            inserted_id = await session.scalar(
-                pg_insert(QueryPath).values(
-                    id=path_id, snapshot_id=run.snapshot_id, path_hash=path_hash,
-                    max_depth=len(path),
-                ).on_conflict_do_nothing(
+        for start in range(0, len(path_items), 1000):
+            inserted = (await session.execute(
+                pg_insert(QueryPath).values([
+                    dict(id=uuid.uuid4(), snapshot_id=run.snapshot_id,
+                         path_hash=path_hash, max_depth=len(path))
+                    for path_hash, path in path_items[start:start + 1000]
+                ]).on_conflict_do_nothing(
                     index_elements=[QueryPath.snapshot_id, QueryPath.path_hash]
-                ).returning(QueryPath.id)
-            )
-            if inserted_id is not None:
-                new_paths[path_hash] = inserted_id
+                ).returning(QueryPath.path_hash, QueryPath.id)
+            )).all()
+            new_paths.update(inserted)
         if new_paths:
             session.add_all([
                 QueryPathField(path_id=new_paths[path_hash], position=position,
