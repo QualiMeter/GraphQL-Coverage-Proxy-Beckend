@@ -103,3 +103,28 @@ def internal_failure(stage: str, exc: Exception, *, run_id: uuid.UUID | None = N
         # Includes metadata/serialization failures and queue.Full. Do not fall
         # back to another logger or stderr. BaseException/cancellation propagates.
         pass
+
+
+def outbound_event(stage: str, outcome: str, *, method=None, elapsed_ms=None,
+                   status=None, attempt=None, family=None):
+    """Only fixed labels and numeric metadata; never accept exception/request data."""
+    try:
+        if stage not in {"dns", "policy", "request", "tcp", "tls", "send_headers", "send_body",
+                         "response_headers", "response_body", "http", "complete", "reconcile"}:
+            return
+        if outcome not in {"error", "timeout", "rejected", "invalid", "ok", "fallback_connected",
+                           "matched", "not_found"}:
+            return
+        event = {"event": "coverage_outbound", "stage": stage, "outcome": outcome}
+        if method in {"GET", "POST"}:
+            event["method"] = method
+        for key, value in (("elapsed_ms", elapsed_ms), ("status", status),
+                           ("attempt", attempt), ("family", family)):
+            if type(value) is int and 0 <= value < 2**63:
+                event[key] = value
+        run_id = _run_id.get()
+        if isinstance(run_id, uuid.UUID):
+            event["run_id"] = str(run_id)
+        _pending.put_nowait((json.dumps(event, sort_keys=True), event))
+    except Exception:
+        pass

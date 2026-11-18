@@ -2,14 +2,18 @@
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlsplit
 
+import httpcore
 import httpx
 
 from app.gitlab_config import GitLabSettings
-from app.upstream import PinnedTransport, UnsafeEndpoint, validate_endpoint
+from app.diagnostics import outbound_event
+from app.upstream import (EndpointResolutionError, EndpointResolutionTimeout,
+                          PinnedTransport, UnsafeEndpoint, validate_endpoint)
 
 
 class GitLabError(Exception):
@@ -67,15 +71,41 @@ class GitLabClient:
         self.settings = settings
 
     async def request(self, method: str, path: str, *, params=None, payload=None):
+        stage, status = "dns", None
+        started = time.monotonic()
+
+        async def trace(event, info):
+            # httpcore's info may contain streams, headers or exceptions. Never
+            # retain or log it. Only fixed event names select a diagnostic stage.
+            nonlocal stage
+            operation, _, state = event.rpartition(".")
+            phases = {"connection.connect_tcp": "tcp", "connection.start_tls": "tls",
+                      "http11.send_request_headers": "send_headers", "http11.send_request_body": "send_body",
+                      "http11.receive_response_headers": "response_headers",
+                      "http11.receive_response_body": "response_body"}
+            if state == "started" and operation in phases:
+                stage = phases[operation]
+            elif state == "failed" and operation in phases and isinstance(info.get("exception"), Exception):
+                # httpcore may continue reading an HTTP error after WriteError;
+                # retain that send failure even if the next phase overwrites it.
+                report("timeout" if isinstance(info["exception"], (httpcore.TimeoutException, TimeoutError))
+                       else "error", phases[operation])
+
+        def report(outcome, phase=None):
+            outbound_event(phase or stage, outcome, method=method, status=status,
+                           elapsed_ms=int((time.monotonic() - started) * 1000))
+
         try:
             async with asyncio.timeout(15):
                 destination = await validate_endpoint(self.settings.host + "/api/v4/" + path)
+                stage = "request"
                 async with httpx.AsyncClient(
-                    transport=PinnedTransport(destination), trust_env=False,
+                    transport=PinnedTransport(destination, trace=trace), trust_env=False,
                     follow_redirects=False, timeout=10,
                 ) as client:
                     async with client.stream(method, destination.url, params=params, json=payload,
                                              headers={"PRIVATE-TOKEN": self.settings.token}) as response:
+                        status = response.status_code
                         # A 5xx or timeout can occur after GitLab has created the pipeline.
                         if response.status_code >= 500 or response.status_code in {408, 429}:
                             raise GitLabError("gitlab_unavailable", ambiguous=method == "POST")
@@ -89,15 +119,26 @@ class GitLabClient:
                             body.extend(chunk)
                             if len(body) > 1024 * 1024:
                                 raise GitLabError("gitlab_invalid_response", ambiguous=method == "POST")
-                        return json.loads(body)
-        except GitLabError:
+                        result = json.loads(body)
+                        report("ok", "complete")
+                        return result
+        except GitLabError as exc:
+            report("invalid" if exc.code == "gitlab_invalid_response" else "rejected", "http")
             raise
-        except (httpx.RequestError, TimeoutError):
+        except (httpx.RequestError, TimeoutError) as exc:
+            report("timeout" if isinstance(exc, (httpx.TimeoutException, TimeoutError)) else "error")
+            # Conservatively keep every network POST failure ambiguous. Even
+            # when diagnostics show a pre-send failure, this never retries POST.
             raise GitLabError("gitlab_network_error", ambiguous=method == "POST") from None
+        except EndpointResolutionError as exc:
+            report("timeout" if isinstance(exc, EndpointResolutionTimeout) else "error", "dns")
+            raise GitLabError("gitlab_destination_unavailable") from None
         except UnsafeEndpoint:
             # Validation happens before credentials or request bytes are sent.
+            report("rejected", "policy")
             raise GitLabError("gitlab_destination_unavailable") from None
         except (ValueError, TypeError):
+            report("invalid")
             raise GitLabError("gitlab_invalid_response", ambiguous=method == "POST") from None
 
     def valid_link(self, url):
