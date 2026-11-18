@@ -23,7 +23,7 @@ class ExecutionCreate(ApiModel):
     test_id: str = Field(min_length=1, max_length=2048)
     name: str = Field(min_length=1, max_length=512)
     framework: Literal["pytest", "playwright"]
-    attempt: int = Field(default=1, ge=1, le=10000, strict=True)
+    attempt: int | None = Field(default=1, ge=1, le=10000, strict=True)
 
     @field_validator("test_id", "name")
     @classmethod
@@ -141,15 +141,27 @@ async def create_execution(session, run_id, payload):
     if existing is not None:
         if existing.run_id != run_id:
             raise NotFoundError("Test execution not found")
-        if any(getattr(existing, name) != getattr(payload, name) for name in ("test_id", "name", "framework", "attempt")):
+        if any(getattr(existing, name) != getattr(payload, name)
+               for name in ("test_id", "name", "framework", "attempt")
+               if name != "attempt" or payload.attempt is not None):
             raise ConflictError("Execution ID already has different metadata")
         await session.commit()
         return await execution_detail(session, run_id, existing.id)
     if run.status != "running":
         raise ConflictError("Cannot start a test in a finished run")
+    test_key = hashlib.sha256(payload.test_id.encode("utf-8")).hexdigest()
+    attempt = payload.attempt
+    if attempt is None:
+        # The run row lock serializes allocation with every other registration.
+        latest = await session.scalar(select(func.max(TestExecution.attempt)).where(
+            TestExecution.run_id == run_id, TestExecution.framework == payload.framework,
+            TestExecution.test_key == test_key))
+        attempt = (latest or 0) + 1
+        if attempt > 10000:
+            raise ConflictError("Test attempt limit reached")
     row = TestExecution(id=payload.id, run_id=run_id, test_id=payload.test_id,
-                        test_key=hashlib.sha256(payload.test_id.encode("utf-8")).hexdigest(),
-                        name=payload.name, framework=payload.framework, attempt=payload.attempt)
+                        test_key=test_key,
+                        name=payload.name, framework=payload.framework, attempt=attempt)
     session.add(row)
     try:
         await session.commit()
