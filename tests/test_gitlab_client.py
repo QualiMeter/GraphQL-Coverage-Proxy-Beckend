@@ -103,6 +103,60 @@ async def test_ambiguous_network_errors(config, gitlab_http, error):
     assert len(requests) == 1
 
 
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout,
+                                      httpx.RemoteProtocolError])
+async def test_get_retries_transient_transport_errors(config, gitlab_http, error):
+    attempts = 0
+
+    def handler(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise error("sensitive upstream token: " + TOKEN)
+        return httpx.Response(200, json=[{"name": "main"}])
+
+    requests = gitlab_http(handler)
+    assert await GitLabClient(config).branches(123, 1) == ["main"]
+    assert attempts == len(requests) == 2
+
+
+async def test_get_stops_after_three_transport_failures(config, gitlab_http, caplog):
+    def handler(request):
+        raise httpx.ConnectError("sensitive upstream token: " + TOKEN)
+
+    requests = gitlab_http(handler)
+    with pytest.raises(GitLabError, match="gitlab_network_error") as caught:
+        await GitLabClient(config).branches(123, 1)
+    assert caught.value.ambiguous is False
+    assert len(requests) == 3
+    assert TOKEN not in str(caught.value) + caplog.text
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
+async def test_get_does_not_retry_http_errors(config, gitlab_http, status):
+    requests = gitlab_http(lambda request: httpx.Response(status))
+    with pytest.raises(GitLabError):
+        await GitLabClient(config).branches(123, 1)
+    assert len(requests) == 1
+
+
+async def test_get_retries_are_bounded_by_total_deadline(config, gitlab_http, monkeypatch):
+    from app import gitlab_client
+
+    monkeypatch.setattr(gitlab_client, "REQUEST_BUDGET_SECONDS", 0.15)
+    monkeypatch.setattr(gitlab_client, "GET_ATTEMPT_BUDGET_SECONDS", 0.1)
+
+    async def handler(request):
+        await asyncio.sleep(1)
+        return httpx.Response(200, json=[{"name": "main"}])
+
+    gitlab_http(handler)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(GitLabError, match="gitlab_network_error"):
+        await GitLabClient(config).branches(123, 1)
+    assert asyncio.get_running_loop().time() - started < 0.5
+
+
 @pytest.mark.parametrize("response", [b"invalid", b"{}", b"[]", b"x" * (1024 * 1024 + 1)])
 async def test_unparseable_success_is_ambiguous(config, gitlab_http, response):
     gitlab_http(lambda request: httpx.Response(201, content=response))
