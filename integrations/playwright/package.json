@@ -1,0 +1,8 @@
+{
+  "name": "graphql-coverage-playwright",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.cjs",
+  "engines": {"node": ">=22"},
+  "devDependencies": {"@playwright/test": "1.58.2"}
+}

@@ -5,3 +5,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+reports/
+node_modules/
+test-results/
+playwright-report/

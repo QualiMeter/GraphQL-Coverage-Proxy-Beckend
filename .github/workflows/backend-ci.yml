@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, feat/test-coverage]
+    branches: [main, feat/test-coverage, feat/test-coverage-sdk]
 
 permissions:
   contents: read
@@ -46,7 +46,15 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -e '.[test]'
+        run: pip install -e '.[test]' -e integrations/python
+
+      - name: Set up Node for Playwright integration checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright test runner
+        run: npm ci --prefix integrations/playwright
 
       - name: Check dependency compatibility
         run: python -m pip check
