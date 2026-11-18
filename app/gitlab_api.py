@@ -12,7 +12,7 @@ from app.api_models import ApiModel
 from app.auth import Principal, current_principal, visibility_kwargs
 from app.contracts import RunStatus
 from app.database import get_session_factory
-from app.diagnostics import internal_failure
+from app.diagnostics import diagnostic_run, internal_failure
 from app.gitlab_client import GitLabClient, GitLabError
 from app.gitlab_config import GitLabConfigurationError, gitlab_settings
 from app.gitlab_runs import apply_result, launch, prepare_launch
@@ -139,7 +139,8 @@ async def post_gitlab_run(payload: LaunchInput, sessions=Depends(get_session_fac
         # Restrict ref to an existing branch, rather than a same-named tag.
         # A failed preflight is definitive: no POST has been attempted yet.
         try:
-            await client.check_branch(item.project, payload.ref)
+            with diagnostic_run(item.run_id):
+                await client.check_branch(item.project, payload.ref)
         except GitLabError as exc:
             await apply_result(sessions, item, config, error=exc, rejected=True)
             raise HTTPException(502, {"code": exc.code, "runId": str(item.run_id)}) from None

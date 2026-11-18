@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select
 
-from app.diagnostics import internal_failure
+from app.diagnostics import diagnostic_run, internal_failure, outbound_event
 from app.gitlab_client import GitLabClient, GitLabError, PipelineInfo
 from app.gitlab_config import GitLabSettings
 from app.models import GitLabPipeline, SchemaSnapshot, TestRun
@@ -138,7 +138,8 @@ async def apply_result(sessions, item: Work, settings: GitLabSettings, *, info: 
 
 async def launch(sessions, settings: GitLabSettings, item: Work, client: GitLabClient):
     try:
-        info = await client.launch(item.project, item.ref, item.run_id)
+        with diagnostic_run(item.run_id):
+            info = await client.launch(item.project, item.ref, item.run_id)
     except GitLabError as exc:
         await apply_result(sessions, item, settings, error=exc, rejected=not exc.ambiguous)
         return exc
@@ -156,15 +157,19 @@ async def poll_once(sessions, settings: GitLabSettings, client: GitLabClient) ->
         if item.host != settings.host:
             # Persisted hosts never select a destination or receive current keys.
             raise GitLabError("gitlab_configuration_changed")
-        async with asyncio.timeout(60):
-            if item.pipeline_id is None:
-                info, page = await client.reconcile(item.project, item.ref, item.run_id, item.created_at, item.page)
-            else:
-                info, page = await client.pipeline(item.project, item.pipeline_id), None
-                if info.ref is not None and info.ref != item.ref:
-                    raise GitLabError("gitlab_invalid_response")
+        with diagnostic_run(item.run_id):
+            async with asyncio.timeout(60):
+                if item.pipeline_id is None:
+                    info, page = await client.reconcile(item.project, item.ref, item.run_id, item.created_at, item.page)
+                    outbound_event("reconcile", "matched" if info is not None else "not_found")
+                else:
+                    info, page = await client.pipeline(item.project, item.pipeline_id), None
+                    if info.ref is not None and info.ref != item.ref:
+                        raise GitLabError("gitlab_invalid_response")
         await apply_result(sessions, item, settings, info=info, page=page)
     except (GitLabError, TimeoutError) as exc:
+        with diagnostic_run(item.run_id):
+            outbound_event("reconcile", "timeout" if isinstance(exc, TimeoutError) else "error")
         error = exc if isinstance(exc, GitLabError) else GitLabError("gitlab_network_error")
         await apply_result(sessions, item, settings, error=error)
     return True

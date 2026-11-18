@@ -8,6 +8,7 @@ import ipaddress
 import os
 import socket
 import ssl
+import time
 from contextlib import contextmanager, asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -17,6 +18,8 @@ from anyio.lowlevel import RunVar
 from fastapi import HTTPException
 import httpcore
 import httpx
+
+from app.diagnostics import outbound_event
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -144,9 +147,29 @@ class PinnedBackend(httpcore.AsyncNetworkBackend):
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         if host != self.destination.url.raw_host.decode("ascii") or port != _origin(self.destination.url)[2]:
             raise httpcore.ConnectError("Unapproved destination")
-        # Fail closed on connection failure. Retrying mutations is never safe.
-        address = self.destination.addresses[0]
-        stream = await self.backend.connect_tcp(address, port, timeout, local_address, socket_options)
+        # Only TCP establishment may try another already validated numeric IP.
+        # No TLS or HTTP bytes have been sent here. Share one connect budget so
+        # a blackholed first address cannot consume it before fallback is tried.
+        started = time.monotonic()
+        addresses = self.destination.addresses
+        for index, address in enumerate(addresses):
+            remaining = None if timeout is None else timeout - (time.monotonic() - started)
+            if remaining is not None and remaining <= 0:
+                raise httpcore.ConnectTimeout("TCP connect budget exhausted")
+            attempt_timeout = None if remaining is None else remaining / (len(addresses) - index)
+            try:
+                stream = await self.backend.connect_tcp(address, port, attempt_timeout,
+                                                        local_address, socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                outbound_event("tcp", "timeout" if isinstance(exc, httpcore.ConnectTimeout) else "error",
+                               attempt=index + 1, family=ipaddress.ip_address(address).version,
+                               elapsed_ms=int((time.monotonic() - started) * 1000))
+                if index + 1 == len(addresses):
+                    raise
+                continue
+            break
+        else:
+            raise httpcore.ConnectError("No approved addresses")
         peer = stream.get_extra_info("server_addr")
         try:
             if (not peer or ipaddress.ip_address(peer[0]) != ipaddress.ip_address(address) or peer[1] != port):
@@ -154,6 +177,10 @@ class PinnedBackend(httpcore.AsyncNetworkBackend):
         except ValueError:
             await stream.aclose()
             raise httpcore.ConnectError("Unapproved peer") from None
+        if index:
+            outbound_event("tcp", "fallback_connected", attempt=index + 1,
+                           family=ipaddress.ip_address(address).version,
+                           elapsed_ms=int((time.monotonic() - started) * 1000))
         return stream
 
     async def connect_unix_socket(self, *args, **kwargs):
@@ -187,8 +214,11 @@ class _ResponseStream(httpx.AsyncByteStream):
 
 
 class PinnedTransport(httpx.AsyncBaseTransport):
-    def __init__(self, destination: Destination):
+    def __init__(self, destination: Destination, *, trace=None):
         self.destination = destination
+        # Trusted instrumentation is supplied by application code, never by an
+        # HTTP request extension (which could replace TLS identity or leak data).
+        self.trace = trace
         self.pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl.create_default_context(), network_backend=PinnedBackend(destination),
             max_connections=1, max_keepalive_connections=0, retries=0,
@@ -204,7 +234,8 @@ class PinnedTransport(httpx.AsyncBaseTransport):
                                  port=request.url.port, target=request.url.raw_path),
                 headers=request.headers.raw, content=request.stream,
                 # Do not accept caller-supplied TLS hostname or tracing callbacks.
-                extensions={"timeout": request.extensions.get("timeout", {})},
+                extensions={"timeout": request.extensions.get("timeout", {}),
+                            **({"trace": self.trace} if self.trace is not None else {})},
             ))
         return httpx.Response(response.status, headers=response.headers,
                               stream=_ResponseStream(response.stream), extensions=response.extensions)
