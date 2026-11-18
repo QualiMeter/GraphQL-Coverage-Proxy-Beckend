@@ -1,6 +1,7 @@
 """Server-owned GitLab bindings. No secrets are persisted or returned to clients."""
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ class GitLabSettings:
     min_percent: float = 80
     poll_seconds: int = 10
     max_run_seconds: int = 3600
+    environments: dict[uuid.UUID, str] = field(default_factory=dict)
 
     def project(self, service_id: uuid.UUID) -> int:
         if service_id not in self.projects:
@@ -46,9 +48,26 @@ def gitlab_settings() -> GitLabSettings:
         if not token or not token.isascii() or any(ord(c) <= 32 or ord(c) == 127 for c in token):
             raise ValueError
         raw = json.loads(os.getenv("GITLAB_SERVICE_PROJECTS", "{}"))
-        projects = {uuid.UUID(key): value for key, value in raw.items()}
-        if not projects or any(type(value) is not int or not 0 < value < 2**63 for value in projects.values()):
+        if not isinstance(raw, dict) or not raw:
             raise ValueError
+        projects, environments = {}, {}
+        for key, value in raw.items():
+            service_id = uuid.UUID(key)
+            if service_id in projects:
+                raise ValueError
+            project = value
+            if isinstance(value, dict):
+                if value.keys() - {"projectId", "environment"}:
+                    raise ValueError
+                project = value.get("projectId")
+                environment = value.get("environment")
+                if environment is not None:
+                    if not isinstance(environment, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_./-]{0,127}", environment):
+                        raise ValueError
+                    environments[service_id] = environment
+            if type(project) is not int or not 0 < project < 2**63:
+                raise ValueError
+            projects[service_id] = project
         coverage_url = os.getenv("GITLAB_COVERAGE_URL", "").rstrip("/")
         parse_endpoint(coverage_url)
         minimum = float(os.getenv("COVERAGE_MIN_PERCENT", "80"))
@@ -56,6 +75,6 @@ def gitlab_settings() -> GitLabSettings:
         maximum = int(os.getenv("GITLAB_MAX_RUN_SECONDS", "3600"))
         if not 0 <= minimum <= 100 or not 2 <= poll <= 300 or not 60 <= maximum <= 86400:
             raise ValueError
-        return GitLabSettings(host, token, projects, coverage_url, minimum, poll, maximum)
+        return GitLabSettings(host, token, projects, coverage_url, minimum, poll, maximum, environments)
     except (ValueError, TypeError, AttributeError):
         raise GitLabConfigurationError() from None

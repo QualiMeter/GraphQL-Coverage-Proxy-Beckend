@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from app.gitlab_client import GitLabClient, GitLabError
+from app.gitlab_client import GitLabClient, GitLabError, JOBS_PAGE_SIZE
 from app.gitlab_config import GitLabConfigurationError, GitLabSettings, gitlab_settings
 from app.upstream import PinnedTransport
 
@@ -182,3 +182,64 @@ async def test_branch_name_is_encoded_and_response_checked(config, gitlab_http):
     assert b"feat%2Fa" in requests[0].url.raw_path
     with pytest.raises(GitLabError):
         await GitLabClient(config).check_branch(123, "another")
+
+
+async def test_pipeline_metadata_comes_from_matching_gitlab_response(config, gitlab_http):
+    gitlab_http(lambda request: httpx.Response(200, json={
+        **data(), "project_id": 123, "ref": "feature/e2e", "sha": "a" * 40, "tag": False,
+    }))
+    client = GitLabClient(config)
+    pipeline = await client.pipeline(123, 42)
+    assert (pipeline.ref, pipeline.commit_sha) == ("feature/e2e", "a" * 40)
+    with pytest.raises(GitLabError):
+        await client.launch(123, "main", uuid.uuid4())
+    with pytest.raises(GitLabError):
+        await client.pipeline(999, 42)
+
+
+def job_data():
+    return {
+        "id": 118, "name": "API регрессия", "stage": "e2e", "status": "running",
+        "web_url": "https://gitlab.example/demo/-/jobs/118",
+        "pipeline": {"id": 42, "project_id": 123},
+        "created_at": "2026-11-18T10:00:00Z", "started_at": "2026-11-18T10:00:01Z",
+        "finished_at": None, "runner": {"token": "ignore-me"},
+    }
+
+
+async def test_job_pages_include_retries_and_allowlist_metadata(config, gitlab_http):
+    jobs = [dict(job_data(), id=118 + i) for i in range(JOBS_PAGE_SIZE)]
+    requests = gitlab_http(lambda request: httpx.Response(200, json=jobs))
+    result, has_more = await GitLabClient(config).jobs(123, 42, 2)
+    assert has_more and len(result) == JOBS_PAGE_SIZE
+    assert result[0].name == "API регрессия"
+    assert result[0].finished_at is None and result[0].started_at.tzinfo is not None
+    assert "ignore-me" not in repr(result)
+    assert requests[0].url.path == "/api/v4/projects/123/pipelines/42/jobs"
+    assert dict(requests[0].url.params) == {"page": "2", "per_page": str(JOBS_PAGE_SIZE), "include_retried": "true"}
+
+
+@pytest.mark.parametrize("changes", [
+    {"pipeline": {"id": 41, "project_id": 123}},
+    {"pipeline": {"id": 42, "project_id": 124}},
+    {"web_url": "https://other.example/-/jobs/118"},
+    {"web_url": "https://gitlab.example/-/jobs/118?secret=value"},
+    {"created_at": "2026-11-18T10:00:00"},
+])
+async def test_jobs_reject_untrusted_identity_link_or_timestamp(changes, config, gitlab_http):
+    gitlab_http(lambda request: httpx.Response(200, json=[{**job_data(), **changes}]))
+    with pytest.raises(GitLabError, match="gitlab_invalid_response"):
+        await GitLabClient(config).jobs(123, 42, 1)
+
+
+def test_server_config_accepts_environment_on_project_binding(monkeypatch):
+    monkeypatch.setenv("GITLAB_ENABLED", "true")
+    monkeypatch.setenv("GITLAB_HOST", "https://gitlab.example")
+    monkeypatch.setenv("GITLAB_TOKEN", TOKEN)
+    monkeypatch.setenv("GITLAB_COVERAGE_URL", "https://coverage.example")
+    monkeypatch.setenv("GITLAB_SERVICE_PROJECTS", json.dumps({
+        str(SERVICE): {"projectId": 123, "environment": "qa/staging"},
+    }))
+    settings = gitlab_settings()
+    assert settings.project(SERVICE) == 123
+    assert settings.environments == {SERVICE: "qa/staging"}

@@ -72,6 +72,23 @@ def test_history_journal_openapi_typed_filters_and_detail():
     assert {'countedInCoverage','selectedFields'} <= schema['components']['schemas']['RequestDetailOut']['properties'].keys()
 
 
+def test_ci_history_openapi_contract():
+    schema = app.openapi()
+    paths = schema["paths"]
+    params = {param["name"]: param["schema"] for param in paths["/api/runs"]["get"]["parameters"]}
+    assert {"branch", "commitSha", "environment", "pipelineId", "pipelineStatus",
+            "jobId", "jobName", "jobStatus", "sortBy", "sortOrder"} <= params.keys()
+    assert params["sortBy"]["enum"] == [
+        "startedAt", "branch", "commitSha", "environment", "pipelineId", "pipelineStatus", "jobId", "jobName",
+    ]
+    models = schema["components"]["schemas"]
+    assert "ci" in models["RunOut"]["properties"]
+    assert {"branch", "commitSha", "environment", "pipelineId", "pipelineUrl"} <= models["RunCiOut"]["properties"].keys()
+    jobs = paths["/api/runs/{run_id}/gitlab/jobs"]["get"]
+    assert jobs["security"]
+    assert jobs["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("/JobPageOut")
+
+
 def test_stage5_openapi_preserves_safe_schema_and_request_contracts():
     schema = app.openapi()
     paths = schema['paths']

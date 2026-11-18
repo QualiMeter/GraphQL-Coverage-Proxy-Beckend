@@ -21,6 +21,10 @@ new migration follows #40's revision. If another task adds a migration in
 parallel, reconcile the Alembic head before merging; do not rename/rewrite
 already applied revisions.
 
+After merging PR #41, this branch was reconciled with `main`. The migration
+`20261126_argument_usage` now follows `20261126_merge_ci_history`, which joins
+`20261125_gitlab_history` and `20261125_run_in_flight`. There is one Alembic head.
+
 ## One mutually exclusive category per request and argument
 
 Canonical coordinate: `Type.field.argumentName`. Type/field use the analyzer's

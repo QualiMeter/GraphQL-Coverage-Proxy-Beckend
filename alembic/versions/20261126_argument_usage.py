@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "20261126_argument_usage"
-down_revision = "20261125_run_in_flight"
+down_revision = "20261126_merge_ci_history"
 branch_labels = None
 depends_on = None
 

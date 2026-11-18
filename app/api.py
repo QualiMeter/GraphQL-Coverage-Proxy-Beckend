@@ -271,19 +271,32 @@ async def post_run(payload: RunCreate, session: AsyncSession = Session,
 
 
 @router.get("/runs", response_model=list[RunOut], responses=TOTAL_RESPONSE,
-            description="Exactly one snapshotId or serviceId. UTC [from,to), startedAt DESC/id DESC. "
-                        "Status accepts running, completed or failed. "
+            description="Exactly one snapshotId or serviceId. UTC [from,to), defaults to startedAt DESC/id DESC. "
+                        "CI metadata and filters require a service grant or admin access. CI values sort NULLs last. "
+                        "Status is the coverage run status; pipelineStatus and jobStatus are separate filters. "
                         "Omitted limit returns all matches for legacy compatibility. Metadata only for admin/CLI.")
 async def get_runs(
     response: Response, filters: Annotated[RunFilters, Query()],
     session: AsyncSession = Session, principal: Principal = Depends(current_principal),
 ):
     try:
+        visibility = visibility_kwargs(principal)
+        include_ci = principal.admin or filters.uses_ci
         if filters.snapshot_id is not None:
-            await ensure_visible_snapshot(session, filters.snapshot_id, **visibility_kwargs(principal))
+            ensure_scope, scope_id = ensure_visible_snapshot, filters.snapshot_id
         else:
-            await ensure_visible_service(session, filters.service_id, **visibility_kwargs(principal))
-        rows, total = await list_run_page(session, filters, include_metadata=principal.admin)
+            ensure_scope, scope_id = ensure_visible_service, filters.service_id
+        await ensure_scope(session, scope_id, require_grant=filters.uses_ci, **visibility)
+        if not include_ci and principal.user_id is not None:
+            try:
+                await ensure_scope(session, scope_id, require_grant=True, **visibility)
+            except NotFoundError:
+                pass
+            else:
+                include_ci = True
+        rows, total = await list_run_page(
+            session, filters, include_metadata=principal.admin, include_ci=include_ci,
+        )
         response.headers["X-Total-Count"] = str(total)
         return rows
     except NotFoundError as exc:
