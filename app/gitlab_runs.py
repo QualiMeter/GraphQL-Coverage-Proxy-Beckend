@@ -105,12 +105,12 @@ async def apply_result(sessions, item: Work, settings: GitLabSettings, *, info: 
                 row.pipeline_status = "launch_rejected" if rejected else "launch_unknown"
         if row.collection_incomplete:
             row.error_code = "tracking_deadline_exceeded"
-        if rejected or (info is not None and info.status in TERMINAL):
+        if (rejected or (info is not None and info.status in TERMINAL)) and not run.in_flight_requests:
             if run.status == "running":
                 await finish_run(session, item.run_id, pipeline_managed=True,
                                  status="failed" if rejected or row.collection_incomplete else "completed", commit=False)
             row.finished_at = stamp
-        elif stamp >= row.deadline_at:
+        elif stamp >= row.deadline_at and not run.in_flight_requests:
             # Stop collection on a finite deadline, retain observations, and keep
             # reconciling GitLab. The unfinished link quarantines this snapshot
             # against duplicate launches until GitLab's outcome is known.

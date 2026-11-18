@@ -34,6 +34,10 @@ def capture_context(monkeypatch):
         return snapshot
 
     session.get.side_effect = get
+    # Unit fixture isolates proxy/capture contracts; real admission and release
+    # concurrency are exercised against PostgreSQL in test_sol_regressions_postgres.
+    monkeypatch.setattr(proxy, "admit_request", AsyncMock())
+    monkeypatch.setattr(proxy, "release_request", AsyncMock())
 
     async def dependency():
         yield session

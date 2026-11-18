@@ -183,23 +183,31 @@ class ExecutionBusy(ConflictError):
     pass
 
 
-async def admit_request(session, run_id, execution_id):
+async def admit_request(session, run_id, execution_id=None):
     run = await get_run(session, run_id, lock=True)
     if run.status != "running":
         raise ConflictError("Coverage run is not running")
-    execution = await get_execution(session, run_id, execution_id, lock=True)
-    if execution.status != "running":
-        raise ConflictError("Test execution has already finished")
-    execution.in_flight_requests += 1
+    if execution_id is not None:
+        execution = await get_execution(session, run_id, execution_id, lock=True)
+        if execution.status != "running":
+            raise ConflictError("Test execution has already finished")
+        execution.in_flight_requests += 1
+    run.in_flight_requests += 1
     await session.commit()
     await session.close()
 
 
-async def release_request(sessions, execution_id):
+async def release_request(sessions, execution_id=None, *, run_id=None):
     async with sessions() as session:
-        await session.execute(update(TestExecution).where(
-            TestExecution.id == execution_id, TestExecution.in_flight_requests > 0,
-        ).values(in_flight_requests=TestExecution.in_flight_requests - 1))
+        # Lock order matches admission and recording: run, then execution.
+        if run_id is not None:
+            await session.execute(update(TestRun).where(
+                TestRun.id == run_id, TestRun.in_flight_requests > 0,
+            ).values(in_flight_requests=TestRun.in_flight_requests - 1))
+        if execution_id is not None:
+            await session.execute(update(TestExecution).where(
+                TestExecution.id == execution_id, TestExecution.in_flight_requests > 0,
+            ).values(in_flight_requests=TestExecution.in_flight_requests - 1))
         await session.commit()
 
 
@@ -314,4 +322,4 @@ async def coverage_summary(session, run_id):
         .select_from(ObservedRequest).where(ObservedRequest.run_id == run_id))).one()
     return TestCoverageSummary(run_id=run_id, collection_status=run.status, total_executions=sum(counts.values()),
         total_tests=total_tests, status_counts=counts, missing_results=counts["running"] if run.status != "running" else 0,
-        in_flight_requests=in_flight, total_requests=total, attributed_requests=attributed, unattributed_requests=total-attributed)
+        in_flight_requests=run.in_flight_requests, total_requests=total, attributed_requests=attributed, unattributed_requests=total-attributed)

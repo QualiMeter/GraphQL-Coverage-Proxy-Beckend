@@ -564,3 +564,31 @@ async def test_first_terminal_observed_after_deadline_is_conservatively_incomple
     async with sessions() as s:
         assert (await s.get(Run, item.run_id)).status == "failed"
         assert (await s.get(GitLabPipeline, item.run_id)).collection_incomplete
+
+
+@pytest.mark.parametrize('expired', [False, True])
+async def test_monitor_defers_terminal_finish_while_graphql_is_admitted(setup, expired):
+    from app.test_executions import admit_request, release_request
+    _, sessions, _, _, config, _ = setup
+    item = await prepare(setup)
+    async with sessions() as session:
+        await admit_request(session, item.run_id)
+    if expired:
+        await due(sessions, item, expired=True)
+    await apply_result(sessions, item, config, info=info('success'))
+    async with sessions() as session:
+        run = await session.get(Run, item.run_id)
+        link = await session.get(GitLabPipeline, item.run_id)
+        assert run.status == 'running' and run.in_flight_requests == 1
+        assert link.finished_at is None and link.pipeline_status == 'success'
+        assert link.lease_token is None
+    await release_request(sessions, run_id=item.run_id)
+    await due(sessions, item)
+    client = AsyncMock(spec=GitLabClient)
+    client.pipeline.return_value = info('success')
+    assert await poll_once(sessions, config, client)
+    async with sessions() as session:
+        run = await session.get(Run, item.run_id)
+        assert run.status == ('failed' if expired else 'completed')
+        assert (await session.get(GitLabPipeline, item.run_id)).finished_at is not None
+    client.launch.assert_not_called()
