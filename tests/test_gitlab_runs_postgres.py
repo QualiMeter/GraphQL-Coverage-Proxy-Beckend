@@ -593,3 +593,81 @@ async def test_monitor_defers_terminal_finish_while_graphql_is_admitted(setup, e
         assert run.status == ('failed' if expired else 'completed')
         assert (await session.get(GitLabPipeline, item.run_id)).finished_at is not None
     client.launch.assert_not_called()
+
+
+async def test_lost_pipeline_response_reconciles_real_client_without_second_post(
+    setup, monkeypatch, caplog,
+):
+    """Real client + HTTPcore, fake socket loss, PostgreSQL intent, then GET recovery."""
+    import json
+    import httpcore
+    from app.upstream import PinnedTransport
+    from test_upstream_security import SocketStream
+
+    _, sessions, _, _, config, _ = setup
+    item = await prepare(setup)
+    connections, streams = [], []
+
+    async def dns(*args, **kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+    async def connect(self, host, port, *args, **kwargs):
+        connections.append((host, port))
+        stream = SocketStream(host)
+        streams.append(stream)
+        return stream
+
+    async def lost_response(*args, **kwargs):
+        # Request bytes have already been written; GitLab may have created it.
+        raise httpcore.ReadTimeout(config.token)
+
+    from app import upstream
+    monkeypatch.setattr(upstream, "_resolve", dns)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
+    monkeypatch.setattr(SocketStream, "read", lost_response)
+    client = GitLabClient(config)
+    error = await launch(sessions, config, item, client)
+    assert error.code == "gitlab_network_error" and error.ambiguous
+    wire = b"".join(streams[0].writes)
+    assert wire.count(b"POST /api/v4/projects/123/pipeline HTTP/1.1") == 1
+    assert str(item.run_id).encode() in wire
+    async with sessions() as s:
+        row, run = await s.get(GitLabPipeline, item.run_id), await s.get(Run, item.run_id)
+        assert row.pipeline_id is None and row.pipeline_status == "launch_unknown"
+        assert run.status == "running" and row.finished_at is None
+
+    requests = []
+    final = False
+
+    async def handle(self, request):
+        requests.append(request)
+        assert request.method == "GET"
+        if request.url.path.endswith("/variables"):
+            payload = [{"key": "COVERAGE_RUN_ID", "value": str(item.run_id)}]
+        else:
+            payload = {"id": 42, "status": "success" if final else "running",
+                       "web_url": info().url, "project_id": 123, "ref": "main"}
+            if request.url.path.endswith("/pipelines"):
+                assert request.url.params["source"] == "api"
+                payload = [payload]
+        return httpx.Response(200, content=json.dumps(payload).encode())
+
+    monkeypatch.setattr(PinnedTransport, "handle_async_request", handle)
+    await due(sessions, item)
+    assert await poll_once(sessions, config, GitLabClient(config))
+    async with sessions() as s:
+        row = await s.get(GitLabPipeline, item.run_id)
+        assert row.pipeline_id == 42 and row.pipeline_status == "running"
+        assert row.error_code is None and row.finished_at is None
+    final = True
+    await due(sessions, item)
+    assert await poll_once(sessions, config, GitLabClient(config))
+    async with sessions() as s:
+        assert (await s.get(Run, item.run_id)).status == "completed"
+        assert (await s.get(GitLabPipeline, item.run_id)).finished_at is not None
+    assert len(connections) == 1 and len(requests) == 3
+    records = [r.diagnostic for r in caplog.records if hasattr(r, "diagnostic")]
+    assert any(e.get("stage") == "reconcile" and e.get("outcome") == "matched"
+               and e.get("run_id") == str(item.run_id) for e in records)
+    assert config.token not in caplog.text
+    assert "COVERAGE_RUN_ID" not in caplog.text and config.coverage_url not in caplog.text
