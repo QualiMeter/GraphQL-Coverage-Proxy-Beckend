@@ -11,6 +11,13 @@ function settings(options = {}) {
   return {base: url.toString().replace(/\/$/, ''), key};
 }
 
+function groups(options) {
+  return {
+    teamKey: options.teamKey ?? process.env.COVERAGE_TEAM_KEY,
+    suiteKey: options.suiteKey ?? process.env.COVERAGE_SUITE_KEY,
+  };
+}
+
 async function metadata(config, method, path, body) {
   for (let attempt = 0; attempt < 3; attempt++) {
     let response;
@@ -78,7 +85,7 @@ class CoverageReporter {
       const promise = Promise.resolve().then(async () => {
         const config = settings(this.options);
         confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(runId)}/tests`, {
-          id, testId, name, framework: 'playwright', attempt,
+          id, testId, name, framework: 'playwright', attempt, ...groups(this.options),
         }), id, runId);
         await finish(config, {id, runId}, result);
       }).catch(error => { this.errors.push(error.message); });
@@ -127,7 +134,7 @@ function createCoverageTest(baseTest, options = {}) {
               const name = Array.from(info.titlePath.join(' › ').trim()).slice(0, 512).join('');
               const attempt = info.retry + 1;
               confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(runId)}/tests`, {
-                id, testId, name, framework: 'playwright', attempt,
+                id, testId, name, framework: 'playwright', attempt, ...groups(options),
               }), id, runId);
               const headers = {'X-Coverage-Run-Id': runId, 'X-Coverage-Test-Execution-Id': id};
               const execution = {id, runId, headers,

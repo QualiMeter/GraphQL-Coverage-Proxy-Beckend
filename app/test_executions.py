@@ -11,6 +11,7 @@ from app.api_models import ApiModel
 from app.contracts import RunStatus
 from app.models import ObservedRequest, RequestFieldEvidence, RequestFieldUsage, SchemaField, SchemaType, TestExecution, TestRun
 from app.services import COVERAGE_KINDS, ConflictError, NotFoundError, counted_observation
+from app.test_groups import GroupFilters, group_conditions
 
 ExecutionStatus = Literal["running", "passed", "failed", "skipped", "interrupted"]
 FinalStatus = Literal["passed", "failed", "skipped", "interrupted"]
@@ -24,10 +25,14 @@ class ExecutionCreate(ApiModel):
     name: str = Field(min_length=1, max_length=512)
     framework: Literal["pytest", "playwright"]
     attempt: int = Field(default=1, ge=1, le=10000, strict=True)
+    team_key: str | None = Field(default=None, min_length=1, max_length=128)
+    suite_key: str | None = Field(default=None, min_length=1, max_length=128)
 
-    @field_validator("test_id", "name")
+    @field_validator("test_id", "name", "team_key", "suite_key")
     @classmethod
     def valid_text(cls, value):
+        if value is None:
+            return value
         if value != value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError("Use nonempty text without surrounding whitespace or control characters")
         try:
@@ -52,7 +57,7 @@ class ExecutionFinish(ApiModel):
         return self
 
 
-class ExecutionFilters(ApiModel):
+class ExecutionFilters(GroupFilters):
     status: ExecutionStatus | None = None
     framework: Literal["pytest", "playwright"] | None = None
     test_id: str | None = Field(default=None, min_length=1, max_length=2048)
@@ -75,6 +80,8 @@ class ExecutionOut(ApiModel):
     test_id: str
     name: str
     framework: str
+    team_key: str | None = None
+    suite_key: str | None = None
     attempt: int
     status: ExecutionStatus
     started_at: datetime
@@ -141,7 +148,8 @@ async def create_execution(session, run_id, payload):
     if existing is not None:
         if existing.run_id != run_id:
             raise NotFoundError("Test execution not found")
-        if any(getattr(existing, name) != getattr(payload, name) for name in ("test_id", "name", "framework", "attempt")):
+        if any(getattr(existing, name) != getattr(payload, name)
+               for name in ("test_id", "name", "framework", "attempt", "team_key", "suite_key")):
             raise ConflictError("Execution ID already has different metadata")
         await session.commit()
         return await execution_detail(session, run_id, existing.id)
@@ -149,7 +157,8 @@ async def create_execution(session, run_id, payload):
         raise ConflictError("Cannot start a test in a finished run")
     row = TestExecution(id=payload.id, run_id=run_id, test_id=payload.test_id,
                         test_key=hashlib.sha256(payload.test_id.encode("utf-8")).hexdigest(),
-                        name=payload.name, framework=payload.framework, attempt=payload.attempt)
+                        name=payload.name, framework=payload.framework, attempt=payload.attempt,
+                        team_key=payload.team_key, suite_key=payload.suite_key)
     session.add(row)
     try:
         await session.commit()
@@ -230,7 +239,7 @@ async def execution_stats(session, run, rows):
     field_counts = {ident: (selected, covered, observed) for ident, selected, covered, observed in fields}
     result = []
     attributes = ("id", "run_id", "test_id", "name", "framework", "attempt", "status", "started_at",
-                  "finished_at", "duration_ms", "failure_code", "in_flight_requests")
+                  "finished_at", "duration_ms", "failure_code", "in_flight_requests", "team_key", "suite_key")
     for row in rows:
         total, counted = request_counts.get(row.id, (0, 0))
         selected, covered, observed = field_counts.get(row.id, (0, 0, 0))
@@ -250,7 +259,7 @@ async def execution_detail(session, run_id, execution_id):
 
 async def execution_page(session, run_id, filters):
     run = await get_run(session, run_id)
-    conditions = [TestExecution.run_id == run_id]
+    conditions = [TestExecution.run_id == run_id, *group_conditions(filters)]
     for name in ("status", "framework"):
         if getattr(filters, name) is not None:
             conditions.append(getattr(TestExecution, name) == getattr(filters, name))
@@ -278,9 +287,10 @@ async def execution_page(session, run_id, filters):
     return await execution_stats(session, run, rows), total
 
 
-async def execution_fields(session, run_id, execution_id, limit=100, offset=0):
-    await get_run(session, run_id)
-    await get_execution(session, run_id, execution_id)
+async def execution_fields(session, run_id, execution_id, limit=100, offset=0, *, groups=None):
+    run = await get_run(session, run_id)
+    if execution_id is not None:
+        await get_execution(session, run_id, execution_id)
     statement = select(SchemaType.name.label("type_name"), SchemaField.name.label("field_name"),
         SchemaType.kind.label("kind"), func.count().label("selected_request_count"),
         func.sum(case((and_(counted_observation(), SchemaType.kind.in_(COVERAGE_KINDS)), 1), else_=0)).label("hits"),
@@ -292,7 +302,12 @@ async def execution_fields(session, run_id, execution_id, limit=100, offset=0):
     statement = statement.join(SchemaField, SchemaField.id == RequestFieldUsage.field_id).join(
         SchemaType, SchemaType.id == SchemaField.type_id).outerjoin(RequestFieldEvidence, and_(
             RequestFieldEvidence.request_id == ObservedRequest.id, RequestFieldEvidence.field_id == SchemaField.id))
-    statement = statement.where(ObservedRequest.run_id == run_id, ObservedRequest.test_execution_id == execution_id)
+    statement = statement.where(ObservedRequest.run_id == run_id, SchemaType.snapshot_id == run.snapshot_id)
+    if execution_id is not None:
+        statement = statement.where(ObservedRequest.test_execution_id == execution_id)
+    if groups is not None:
+        statement = statement.outerjoin(TestExecution, TestExecution.id == ObservedRequest.test_execution_id)
+        statement = statement.where(*group_conditions(groups))
     statement = statement.group_by(SchemaType.id, SchemaType.name, SchemaType.kind, SchemaField.id, SchemaField.name)
     total = await session.scalar(select(func.count()).select_from(statement.subquery()))
     rows = (await session.execute(statement.order_by(SchemaType.name, SchemaField.name).limit(limit).offset(offset))).mappings().all()

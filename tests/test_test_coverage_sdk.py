@@ -28,6 +28,31 @@ def test_metadata_retry_preserves_execution_identity(monkeypatch):
     assert ids == [execution.id, execution.id]
 
 
+def test_sdk_sends_primary_team_and_suite(monkeypatch):
+    execution = Execution("http://coverage.test", uuid4(), "test-key", "test", "Test",
+                          team_key="checkout", suite_key="smoke")
+    payloads = []
+
+    def handle(request):
+        payloads.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": execution.id, "runId": execution.run_id})
+
+    transport(monkeypatch, handle)
+    execution.start()
+    assert payloads[0]["teamKey"] == "checkout"
+    assert payloads[0]["suiteKey"] == "smoke"
+
+
+def test_pytest_group_marker_overrides_runner_default(monkeypatch):
+    from types import SimpleNamespace
+    from coverage_test.pytest_plugin import group_key
+    monkeypatch.setenv("COVERAGE_TEAM_KEY", "default")
+    item = SimpleNamespace(get_closest_marker=lambda name: SimpleNamespace(args=("checkout",)))
+    assert group_key(item, "team") == "checkout"
+    item.get_closest_marker = lambda name: None
+    assert group_key(item, "team") == "default"
+
+
 def test_metadata_redirect_does_not_forward_credentials(monkeypatch):
     calls = []
 

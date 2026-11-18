@@ -125,12 +125,16 @@ class TestExecution(Base):
         CheckConstraint("failure_code IS NULL OR failure_code IN ('test_failed', 'assertion_failed', 'setup_failed', "
                         "'teardown_failed', 'timeout', 'runner_interrupted')", name="valid_test_failure_code"),
         Index("ix_test_executions_run_started_id", "run_id", "started_at", "id"),
+        Index("ix_test_executions_run_team", "run_id", "team_key"),
+        Index("ix_test_executions_run_suite", "run_id", "suite_key"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     run_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("test_runs.id", ondelete="RESTRICT"), nullable=False)
     test_id: Mapped[str] = mapped_column(String(2048), nullable=False)
+    team_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    suite_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     test_key: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(512), nullable=False)
     framework: Mapped[str] = mapped_column(String(16), nullable=False)

@@ -13,7 +13,8 @@ class CoverageTrackingError(RuntimeError):
 
 
 class TestExecution:
-    def __init__(self, base_url, run_id, api_key, test_id, name, *, framework="pytest", attempt=1, execution_id=None):
+    def __init__(self, base_url, run_id, api_key, test_id, name, *, framework="pytest", attempt=1,
+                 execution_id=None, team_key=None, suite_key=None):
         url = httpx.URL(base_url)
         if url.scheme not in {"http", "https"} or not url.host or url.userinfo or url.query or url.fragment:
             raise ValueError("Use a Coverage API base URL without credentials, query or fragment")
@@ -21,6 +22,10 @@ class TestExecution:
         self.run_id, self.key = str(run_id), api_key
         self.id = str(execution_id or uuid4())
         self.payload = {"id": self.id, "testId": test_id, "name": " ".join(name.split())[:512], "framework": framework, "attempt": attempt}
+        if team_key is not None:
+            self.payload["teamKey"] = team_key
+        if suite_key is not None:
+            self.payload["suiteKey"] = suite_key
         self.started = self.finished = False
         self.snapshot = None
         self.final_result = None
@@ -125,7 +130,10 @@ def begin_current_test(base_url, run_id, api_key):
         return None
     key = (base_url.rstrip("/"), str(run_id))
     if key not in context.executions:
-        execution = TestExecution(base_url, run_id, api_key, context.test_id, context.name, attempt=context.attempt)
+        execution = TestExecution(
+            base_url, run_id, api_key, context.test_id, context.name, attempt=context.attempt,
+            team_key=getattr(context, "team_key", None), suite_key=getattr(context, "suite_key", None),
+        )
         context.executions[key] = execution
         execution.start()
     return context.executions[key]

@@ -6,11 +6,26 @@ import pytest
 from coverage_test.client import CURRENT_TEST, CoverageTrackingError, begin_current_test
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "coverage_team(key): owning team key")
+    config.addinivalue_line("markers", "coverage_suite(key): primary test suite key")
+
+
+def group_key(item, name):
+    marker = item.get_closest_marker("coverage_" + name)
+    if marker is not None:
+        if len(marker.args) != 1 or not isinstance(marker.args[0], str):
+            raise CoverageTrackingError("Coverage group marker requires one string key")
+        return marker.args[0]
+    return os.environ.get("COVERAGE_" + name.upper() + "_KEY")
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_protocol(item, nextitem):
     marker = item.get_closest_marker("case")
     name = str(marker.args[0]) if marker and marker.args else item.name
-    context = SimpleNamespace(test_id=item.nodeid, name=name[:512], attempt=1, executions={}, reports=[])
+    context = SimpleNamespace(test_id=item.nodeid, name=name[:512], attempt=1, executions={}, reports=[],
+                              team_key=group_key(item, "team"), suite_key=group_key(item, "suite"))
     token = CURRENT_TEST.set(context)
     contexts = getattr(item.config, "_coverage_test_contexts", [])
     contexts.append(context)
