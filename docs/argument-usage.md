@@ -181,7 +181,7 @@ regressions from #40. Deployment/production smoke tests are outside this task.
 | `app/argument_usage.py` | Catalog, category validation, typed API response/example and consistent aggregation. |
 | `app/api.py` | Protected, filtered and paginated GET run arguments route. |
 | `alembic/versions/20261126_argument_usage.py` | Additive migration, constraints, foreign keys and index. |
-| `tests/test_argument_usage.py` | 31 unit/OpenAPI cases. |
+| `tests/test_argument_usage.py` | 32 unit/OpenAPI cases, including CI compatibility regression. |
 | `tests/test_argument_usage_postgres.py` | 30 PostgreSQL capture/API/privacy/concurrency/migration cases. |
 | `tests/test_auth_migrations_postgres.py` | Historical comparison allows new column and explicitly asserts NULL. |
 | `tests/test_final_features_postgres.py` | Historical safe-document migration asserts nullable argument version. |
@@ -230,3 +230,20 @@ git diff --check
 Final local full-suite logs are `/tmp/gcp-argument-usage-final-pg18.log` and
 `/tmp/gcp-argument-usage-final-pg16.log`. Production/Docker deployment smoke tests
 were not invoked; the repository CI workflow is unchanged.
+
+## CI compatibility correction
+
+The first PR CI run resolved `graphql-core 3.3.2`, while the initial local runs
+used `3.2.14`. Six unit cases failed: 3.3 returns a `VariableValues` object with
+`.coerced`/`.sources`, whereas 3.2 returns a dictionary. The analyzer now reads
+argument nullness from `.coerced` when present and passes the original native
+object to directive coercion. Failed/unavailable variable coercion uses `None`
+(supported by both versions), preserving validation errors and uncertainty.
+
+The existing variable/default/directive tests reproduced all six failures on
+3.3.2 before the fix. A further regression covers a literal directive alongside
+unavailable argument variables. CI now tests both supported dependency lines
+(`3.2.*` and `3.3.*`) with `fail-fast: false`, including full PostgreSQL and Docker
+smoke checks. Production deployment conditions are unchanged.
+
+Additional changed file: `.github/workflows/backend-ci.yml` (dependency matrix).

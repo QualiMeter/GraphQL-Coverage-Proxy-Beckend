@@ -137,9 +137,14 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
     invalid_variables = isinstance(variable_values, list) or request.variables is None
     # A coercion error never becomes selected-field coverage. Argument syntax
     # can still be classified, conservatively treating every variable as unknown.
-    argument_variables = None if invalid_variables else variable_values
+    # graphql-core 3.2 returns a dict; 3.3 returns VariableValues with
+    # .coerced and .sources. Directives need the original version-native
+    # object, while argument nullness reads only the coerced mapping.
+    argument_variables = None if invalid_variables else getattr(variable_values, "coerced", variable_values)
     if invalid_variables:
-        variable_values = {}
+        # Both versions accept None for unavailable variables. A bare dict
+        # would break 3.3 directive coercion instead of yielding GraphQLError.
+        variable_values = None
 
     root_type = (
         schema.query_type if operation_type == "query" else schema.mutation_type

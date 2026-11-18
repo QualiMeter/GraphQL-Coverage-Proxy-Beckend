@@ -152,3 +152,9 @@ def test_openapi_argument_contract_and_response_example():
     example = model['examples'][0]
     assert example['availability'] == 'partial' and example['items'][0]['mixedCount'] == 1
     assert not {'variables','value','defaultValue'} & schema['components']['schemas']['ArgumentUsageOut']['properties'].keys()
+
+
+def test_literal_directive_with_unavailable_variables_still_classifies_arguments():
+    result = analyze('query($s: Status) { orders(status: $s) @include(if: true) { id } }', unavailable=True)
+    assert result.status == 'validation_error' and result.fields == ()
+    assert states(result)['Query', 'orders', 'status'] == 'unknown'
