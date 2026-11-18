@@ -162,7 +162,7 @@ async def test_http_exchange_committed_before_response_and_correct_snapshot(
         "Cookie": "session=private-cookie", "Content-Type": "application/json",
         "X-Forwarded-For": "spoofed",
     }) as response:
-        assert commits == [True]
+        assert commits == [True, True]  # admission, then the observation commit
         assert response.status_code == 201
         assert b"".join([chunk async for chunk in response.aiter_raw()]) == wire
         assert response.headers.get_list("set-cookie") == ["a=1", "b=2"]
@@ -255,7 +255,13 @@ async def test_failures_never_invent_coverage(
 
     monkeypatch.setattr(app, "state", State({"coverage_analyzer": analyzer}))
     if case == "commit_failure":
+        real_commit = session.commit
+        commits = 0
         async def fail_commit():
+            nonlocal commits
+            commits += 1
+            if commits == 1:
+                return await real_commit()  # admit before exercising observation failure
             raise RuntimeError("private-storage-query-token-cookie")
         monkeypatch.setattr(session, "commit", fail_commit)
     requests = upstream(lambda request: raw_response())

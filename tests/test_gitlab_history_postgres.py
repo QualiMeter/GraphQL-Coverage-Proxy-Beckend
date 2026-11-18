@@ -181,10 +181,20 @@ async def test_job_sync_keeps_partial_history_on_error_and_finishes_after_restar
         row = await session.get(GitLabPipeline, item.run_id)
         assert row.commit_sha == SHA and row.jobs_page == 2 and row.jobs_synced_at is None
         assert (await session.get(GitLabJob, (item.run_id, 11))).status == "pending"
-        assert (await session.get(Run, item.run_id)).status == "running"
+        run = await session.get(Run, item.run_id)
+        assert run.status == "running"
+        run.in_flight_requests = 1
         row.next_check_at = now()
     tracking = await claim(sessions)
     assert tracking.run_id == item.run_id
+    await apply_result(sessions, tracking, settings, info=pipeline(100))
+    async with sessions.begin() as session:
+        row = await session.get(GitLabPipeline, item.run_id)
+        run = await session.get(Run, item.run_id)
+        assert run.status == "running" and row.finished_at is None and row.jobs_page == 2
+        run.in_flight_requests = 0
+        row.next_check_at = now()
+    tracking = await claim(sessions)
     await apply_result(sessions, tracking, settings, info=pipeline(100))
 
     restarted = AsyncMock(spec=GitLabClient)

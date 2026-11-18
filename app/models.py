@@ -91,6 +91,7 @@ class TestRun(Base):
     __table_args__ = (
         Index("ix_test_runs_snapshot_started_id", "snapshot_id", "started_at", "id"),
         CheckConstraint("status IN ('running', 'completed', 'failed')", name="valid_status"),
+        CheckConstraint("in_flight_requests >= 0", name="nonnegative_run_in_flight"),
         Index(
             "uq_test_runs_running_snapshot", "snapshot_id", unique=True,
             postgresql_where=text("status = 'running'"),
@@ -105,6 +106,7 @@ class TestRun(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    in_flight_requests: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
