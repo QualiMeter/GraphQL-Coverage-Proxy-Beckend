@@ -84,6 +84,7 @@ async def load_run_comparison(
     session: AsyncSession,
     payload: RunComparisonRequest,
     principal: Principal,
+    *, max_fields: int | None = None,
 ) -> "ComparisonData":
     """Materialize batched scalar rows within the caller's read-only snapshot.
 
@@ -131,13 +132,18 @@ async def load_run_comparison(
         schema_sdl=selected[0]["schema_sdl"],
     )
     # Denominator includes every persisted OBJECT field, including root fields.
-    field_rows = (await session.execute(
+    field_statement = (
         select(SchemaType.id.label("type_id"), SchemaType.name.label("type_name"),
                SchemaField.id.label("field_id"), SchemaField.name.label("field_name"))
         .join(SchemaField, SchemaField.type_id == SchemaType.id)
         .where(SchemaType.snapshot_id == snapshot.id, SchemaType.kind == "OBJECT")
         .order_by(SchemaType.name, SchemaField.name)
-    )).mappings().all()
+    )
+    if max_fields is not None:
+        field_statement = field_statement.limit(max_fields + 1)
+    field_rows = (await session.execute(field_statement)).mappings().all()
+    if max_fields is not None and len(field_rows) > max_fields:
+        raise RunComparisonError("EXPORT_TOO_LARGE", "Comparison export exceeds the field/run limit")
 
     # Aggregate counted hits in one query. RequestFieldUsage's composite key
     # guarantees one hit per field per request, even for repeated selections.

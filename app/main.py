@@ -19,6 +19,7 @@ from app.test_coverage_api import router as test_coverage_router
 from app.gitlab_config import gitlab_enabled, gitlab_settings
 from app.gitlab_history import monitor_jobs
 from app.gitlab_runs import monitor
+from app.export_api import router as export_router
 
 
 @asynccontextmanager
@@ -44,13 +45,16 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="GraphQL Coverage API", version="0.1.0", lifespan=lifespan)
 app.state.coverage_analyzer = analyze_e2e_query
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins(), allow_methods=["*"],
-                   allow_headers=["*"], expose_headers=["X-Total-Count"], allow_credentials=False)
+                   allow_headers=["*"],
+                   expose_headers=["X-Total-Count", "Content-Disposition", "X-Export-Format-Version"],
+                   allow_credentials=False)
 app.add_middleware(AuthBoundaryMiddleware)
 app.include_router(router)
 app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(gitlab_router)
 app.include_router(test_coverage_router)
+app.include_router(export_router)
 
 
 @app.get("/health", tags=["System"])
@@ -63,7 +67,7 @@ async def safe_validation_error(request: Request, exc: RequestValidationError):
     if (route_path(request.scope).startswith("/api/auth/")
             or route_path(request.scope).startswith("/api/services")
             or route_path(request.scope).startswith("/api/schemas")
-            or route_path(request.scope) == "/api/runs/gitlab"
+            or route_path(request.scope) in {"/api/runs/gitlab", "/api/runs/compare/export"}
             or (route_path(request.scope).startswith("/api/runs/") and "/tests" in route_path(request.scope))):
         # Pydantic's default error input can echo a submitted password or body.
         return JSONResponse(status_code=422, content={"detail": [
