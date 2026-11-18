@@ -400,6 +400,7 @@ async def test_lifespan_restores_polling_without_browser(isolated_database, monk
         checked.set()
         return info("failed")
     monkeypatch.setattr(GitLabClient, "pipeline", status)
+    monkeypatch.setattr(GitLabClient, "jobs", AsyncMock(return_value=([], False)))
     monkeypatch.setattr(main, "SessionFactory", sessions)
     monkeypatch.setattr(main, "gitlab_enabled", lambda: True)
     monkeypatch.setattr(main, "gitlab_settings", lambda: config)
