@@ -69,6 +69,8 @@ class AnalysisResult:
     operation_type: OperationType | None = None
     operation_name: str | None = None
     fields: tuple[FieldReference, ...] = ()
+    paths: tuple[tuple[FieldReference, ...], ...] = ()
+    max_depth: int | None = None
     error_code: str | None = None
     selection_plan: SelectionScope | None = None
 

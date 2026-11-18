@@ -1,5 +1,6 @@
 """Schema, run and observation storage shared by HTTP routes and the proxy."""
 
+import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -8,16 +9,18 @@ from datetime import datetime, timezone
 
 from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api_models import (
     CoverageGraph, CoverageSummary, GraphField, GraphRelation, GraphType,
     RequestOut, RunOut, SchemaOut, SchemaSdlOut, ServiceOut,
 )
-from app.contracts import RequestObservationInput
+from app.contracts import FieldReference, RequestObservationInput
 from app.auth_models import ServiceGrant
 from app.models import (
-    GitLabPipeline, GraphQLService, ObservedRequest, RequestFieldEvidence, RequestFieldUsage, SchemaField,
+    GitLabPipeline, GraphQLService, ObservedRequest, QueryPath, QueryPathField,
+    RequestFieldEvidence, RequestPathUsage, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
 )
 from app.schema_metadata import schema_metadata, root_types, argument_metadata, abstract_metadata
@@ -419,24 +422,43 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
         "success", "parse_error", "validation_error", "unsupported", "internal_error"
     }:
         raise InvalidReferenceError("Unknown analysis status")
-    if analysis.status != "success" and analysis.fields:
+    if analysis.status != "success" and (
+        analysis.fields or analysis.paths or analysis.max_depth is not None
+    ):
         raise InvalidReferenceError("Failed analysis cannot claim covered fields")
+    if analysis.max_depth is not None:
+        if not 0 <= analysis.max_depth <= 64:
+            raise InvalidReferenceError("Analysis maximum depth is out of range")
+        if analysis.max_depth != max((len(path) for path in analysis.paths), default=0):
+            raise InvalidReferenceError("Analysis paths do not match their maximum depth")
+    if analysis.paths and analysis.max_depth is None:
+        raise InvalidReferenceError("Analysis paths require a maximum depth")
 
     field_ids: dict[tuple[str, str], uuid.UUID] = {}
-    if analysis.fields:
+    coordinates = set(analysis.fields)
+    coordinates.update(coordinate for path in analysis.paths for coordinate in path)
+    if coordinates:
         rows = (await session.execute(
             select(SchemaType.name, SchemaField.name, SchemaField.id)
             .join(SchemaField, SchemaField.type_id == SchemaType.id)
             .where(SchemaType.snapshot_id == run.snapshot_id)
         )).all()
         field_ids = {(type_name, field_name): field_id for type_name, field_name, field_id in rows}
-        missing = {
-            (item.type_name, item.field_name)
-            for item in analysis.fields
-            if (item.type_name, item.field_name) not in field_ids
-        }
+        missing = {(item.type_name, item.field_name) for item in coordinates
+                   if (item.type_name, item.field_name) not in field_ids}
         if missing:
             raise InvalidReferenceError(f"Fields are absent from the run schema: {sorted(missing)}")
+
+    canonical_paths: dict[str, tuple[FieldReference, ...]] = {}
+    for path in analysis.paths:
+        if not path or len(path) > 64:
+            raise InvalidReferenceError("Analysis path is empty or exceeds the depth limit")
+        encoded = json.dumps(
+            [[coordinate.type_name, coordinate.field_name] for coordinate in path],
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        path_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        canonical_paths[path_hash] = path
 
     evidence = observation.field_evidence
     if evidence is not None:
@@ -465,12 +487,48 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
         graphql_error_details_availability=observation.graphql_errors.availability,
         graphql_error_details=observation.graphql_errors.details,
         duration_ms=observation.duration_ms,
+        max_depth=analysis.max_depth if analysis.status == "success" else None,
         error_code=analysis.error_code,
     )
     session.add(row)
     await session.flush()
     for key in {(item.type_name, item.field_name) for item in analysis.fields}:
         session.add(RequestFieldUsage(request_id=row.id, field_id=field_ids[key]))
+    if canonical_paths:
+        # Keep bind counts bounded below asyncpg's limit, and acquire unique
+        # index entries in a stable order across concurrent runs of a snapshot.
+        path_items = sorted(canonical_paths.items())
+        new_paths: dict[str, uuid.UUID] = {}
+        for start in range(0, len(path_items), 1000):
+            inserted = (await session.execute(
+                pg_insert(QueryPath).values([
+                    dict(id=uuid.uuid4(), snapshot_id=run.snapshot_id,
+                         path_hash=path_hash, max_depth=len(path))
+                    for path_hash, path in path_items[start:start + 1000]
+                ]).on_conflict_do_nothing(
+                    index_elements=[QueryPath.snapshot_id, QueryPath.path_hash]
+                ).returning(QueryPath.path_hash, QueryPath.id)
+            )).all()
+            new_paths.update(inserted)
+        if new_paths:
+            session.add_all([
+                QueryPathField(path_id=new_paths[path_hash], position=position,
+                               field_id=field_ids[(coordinate.type_name, coordinate.field_name)])
+                for path_hash, path in canonical_paths.items() if path_hash in new_paths
+                for position, coordinate in enumerate(path)
+            ])
+            await session.flush()
+        path_rows = (await session.execute(
+            select(QueryPath.path_hash, QueryPath.id).where(
+                QueryPath.snapshot_id == run.snapshot_id,
+                QueryPath.path_hash.in_(canonical_paths),
+            )
+        )).all()
+        path_ids = {path_hash: path_id for path_hash, path_id in path_rows}
+        session.add_all([
+            RequestPathUsage(request_id=row.id, path_id=path_ids[path_hash])
+            for path_hash in canonical_paths
+        ])
     if evidence is not None:
         # Flush FK parents before a single batched evidence INSERT. All three
         # entities still commit together under the same run/finish lock.

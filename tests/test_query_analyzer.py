@@ -67,6 +67,18 @@ def test_analyzes_nested_fields_lists_aliases_and_uses_schema_coordinates():
         ("Order", "total"),
     }
     assert len(result.fields) == len(coordinates(result))
+    assert result.max_depth == 3
+    assert {
+        tuple((field.type_name, field.field_name) for field in path)
+        for path in result.paths
+    } == {
+        (("Query", "user"),),
+        (("Query", "user"), ("User", "id")),
+        (("Query", "user"), ("User", "name")),
+        (("Query", "user"), ("User", "orders")),
+        (("Query", "user"), ("User", "orders"), ("Order", "id")),
+        (("Query", "user"), ("User", "orders"), ("Order", "total")),
+    }
 
 
 def test_selects_only_operation_named_in_request():
@@ -214,6 +226,45 @@ def test_nested_type_conditions_keep_the_narrower_runtime_type():
     assert coordinates(result) == {("Query", "user"), ("Node", "id")}
 
 
+def test_fragments_do_not_increase_depth_and_paths_keep_type_condition_fields():
+    result = analyze_query(
+        SCHEMA,
+        GraphQLQueryInput(query="""
+            { search { ... on User { ...UserDetails } } }
+            fragment UserDetails on User { name }
+        """),
+    )
+
+    assert result.status == "success"
+    assert result.max_depth == 2
+    assert result.paths == (
+        (FieldReference("Query", "search"),),
+        (FieldReference("Query", "search"), FieldReference("User", "name")),
+    )
+
+
+def test_reused_fragment_yields_distinct_paths_but_aliases_are_not_in_paths():
+    result = analyze_query(
+        SCHEMA,
+        GraphQLQueryInput(query="""
+            {
+              primary: user(id: "1") { ...UserDetails }
+              search { ... on User { ...UserDetails } }
+            }
+            fragment UserDetails on User { display: name }
+        """),
+    )
+
+    assert result.status == "success"
+    paths = {
+        tuple((field.type_name, field.field_name) for field in path)
+        for path in result.paths
+    }
+    assert (("Query", "user"), ("User", "name")) in paths
+    assert (("Query", "search"), ("User", "name")) in paths
+    assert len(paths) == len(result.paths)
+
+
 @pytest.mark.parametrize("query", [
     "{ health user(id: \"1\") { ...Missing } }",
     "{ health user(id: \"1\") { ...A } } fragment A on User { ...B } fragment B on User { ...A }",
@@ -303,3 +354,17 @@ def test_missing_operation_name_does_not_persist_untrusted_client_text():
     assert result.error_code == "OPERATION_NOT_FOUND"
     assert result.operation_name is None
     assert result.fields == ()
+
+
+def test_path_limit_preserves_basic_analysis(monkeypatch):
+    from graphql import build_schema
+    from app import query_analyzer
+    schema = build_schema('type Query { user: User } type User { id: ID }')
+    request = GraphQLQueryInput(query='{ user { id } }')
+    normal = analyze_query(schema, request)
+    monkeypatch.setattr(query_analyzer, 'MAX_PATHS_PER_REQUEST', 1)
+    limited = analyze_query(schema, request)
+    assert limited.status == normal.status == 'success'
+    assert limited.fields == normal.fields
+    assert limited.selection_plan == normal.selection_plan
+    assert limited.paths == () and limited.max_depth is None

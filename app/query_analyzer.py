@@ -34,6 +34,7 @@ from app.diagnostics import internal_failure
 MAX_QUERY_TOKENS = 10_000
 MAX_SELECTION_DEPTH = 64
 MAX_SELECTION_VISITS = 20_000
+MAX_PATHS_PER_REQUEST = 5_000
 
 
 class _UnsupportedDirective(Exception):
@@ -156,7 +157,9 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
     try:
         for variable in operation.variable_definitions or ():
             _check_directives(variable)
-        fields, plan = _collect_fields(schema, root_type, operation.selection_set, fragments, variable_values)
+        fields, plan, paths, max_depth = _collect_fields(
+            schema, root_type, operation.selection_set, fragments, variable_values,
+        )
     except (_UnsupportedDirective, _AnalysisLimitExceeded) as exc:
         return AnalysisResult(
             status="unsupported",
@@ -169,6 +172,8 @@ def _analyze_query(schema: GraphQLSchema, request: GraphQLQueryInput) -> Analysi
         operation_type=operation_type,
         operation_name=operation_name,
         fields=fields,
+        paths=paths,
+        max_depth=max_depth,
         selection_plan=plan,
     )
 
@@ -196,11 +201,19 @@ def _collect_fields(
     selection_set: SelectionSetNode,
     fragments: dict[str, FragmentDefinitionNode],
     variables,
-) -> tuple[tuple[FieldReference, ...], SelectionScope]:
-    """Collect coordinates and the response plan together in one bounded walk."""
+) -> tuple[
+    tuple[FieldReference, ...],
+    SelectionScope,
+    tuple[tuple[FieldReference, ...], ...],
+    int | None,
+]:
+    """Collect unique coordinates, a response plan, and bounded canonical paths."""
     fields: dict[FieldReference, None] = {}
+    paths: dict[tuple[FieldReference, ...], None] = {}
     object_types_by_name: dict[str, frozenset[GraphQLObjectType]] = {}
     visited_selections = 0
+    max_depth = 0
+    paths_available = True
 
     def possible_objects(graphql_type: GraphQLCompositeType) -> frozenset[GraphQLObjectType]:
         if graphql_type.name not in object_types_by_name:
@@ -214,11 +227,12 @@ def _collect_fields(
         parent_type: GraphQLCompositeType,
         selections: SelectionSetNode,
         possible_parent_objects: frozenset[GraphQLObjectType],
-        depth: int,
+        selection_depth: int,
+        parent_path: tuple[FieldReference, ...],
         visited_fragments: set[tuple[str, frozenset[GraphQLObjectType]]],
     ) -> tuple[PlannedField, ...]:
-        nonlocal visited_selections
-        if depth > MAX_SELECTION_DEPTH:
+        nonlocal visited_selections, max_depth, paths_available
+        if selection_depth > MAX_SELECTION_DEPTH:
             raise _AnalysisLimitExceeded
         planned: list[PlannedField] = []
         applicable_types = frozenset(obj.name for obj in possible_parent_objects)
@@ -239,6 +253,17 @@ def _collect_fields(
                     continue
                 coordinate = FieldReference(parent_type.name, field_name)
                 fields[coordinate] = None
+                path = parent_path + (coordinate,)
+                if paths_available and path not in paths:
+                    if len(paths) >= MAX_PATHS_PER_REQUEST:
+                        # Optional analytics must not invalidate selected fields
+                        # or the response plan. Discard incomplete path data so
+                        # existing availability reporting stays truthful.
+                        paths_available = False
+                        paths.clear()
+                    else:
+                        paths[path] = None
+                max_depth = max(max_depth, len(path))
                 definition = parent_type.fields[field_name]
                 child = None
                 if selection.selection_set is not None:
@@ -250,7 +275,8 @@ def _collect_fields(
                         # own plan even though its schema coordinates are shared.
                         child = SelectionScope(
                             frozenset(obj.name for obj in child_objects),
-                            walk(child_type, selection.selection_set, child_objects, depth + 1, set()),
+                            walk(child_type, selection.selection_set, child_objects,
+                                 selection_depth + 1, path, set()),
                         )
                 wrapper, list_depth = definition.type, 0
                 while isinstance(wrapper, (GraphQLList, GraphQLNonNull)):
@@ -277,11 +303,13 @@ def _collect_fields(
                 if fragment_visit in visited_fragments:
                     continue
                 visited_fragments.add(fragment_visit)
+            # Fragment/type-condition expansion changes schema context, not
+            # the selected-field depth or canonical field path.
             planned.extend(walk(fragment_type, fragment.selection_set, matching_objects,
-                                depth + 1, visited_fragments))
+                                selection_depth + 1, parent_path, visited_fragments))
         return tuple(planned)
 
     root_objects = possible_objects(root_type)
     plan = SelectionScope(frozenset(obj.name for obj in root_objects),
-                          walk(root_type, selection_set, root_objects, 1, set()))
-    return tuple(fields), plan
+                          walk(root_type, selection_set, root_objects, 1, (), set()))
+    return tuple(fields), plan, tuple(paths), max_depth if paths_available else None

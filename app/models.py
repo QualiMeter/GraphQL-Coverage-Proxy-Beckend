@@ -150,6 +150,7 @@ class ObservedRequest(Base):
         ),
         CheckConstraint("http_status IS NULL OR http_status BETWEEN 100 AND 599", name="valid_http_status"),
         CheckConstraint("duration_ms IS NULL OR duration_ms >= 0", name="nonnegative_duration"),
+        CheckConstraint("max_depth IS NULL OR max_depth BETWEEN 0 AND 64", name="valid_analysis_max_depth"),
     )
 
     field_evidence_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -174,6 +175,7 @@ class ObservedRequest(Base):
         String(16), nullable=False, server_default="unavailable")
     graphql_error_details: Mapped[list[dict] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -199,6 +201,48 @@ class RequestFieldUsage(Base):
     field_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("schema_fields.id", ondelete="RESTRICT"), primary_key=True,
         index=True,
+    )
+
+
+class QueryPath(Base):
+    """Snapshot-specific canonical path of schema field coordinates."""
+    __tablename__ = "query_paths"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "path_hash", name="uq_query_paths_snapshot_hash"),
+        CheckConstraint("max_depth BETWEEN 1 AND 64", name="valid_query_path_depth"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("schema_snapshots.id", ondelete="RESTRICT"), nullable=False, index=True,
+    )
+    path_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    max_depth: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class QueryPathField(Base):
+    """Ordered schema-field coordinates belonging to a canonical path."""
+    __tablename__ = "query_path_fields"
+    __table_args__ = (CheckConstraint("position >= 0", name="nonnegative_path_position"),)
+
+    path_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("query_paths.id", ondelete="CASCADE"), primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    field_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("schema_fields.id", ondelete="RESTRICT"), nullable=False, index=True,
+    )
+
+
+class RequestPathUsage(Base):
+    """A request contributes at most one hit to each canonical analyzed path."""
+    __tablename__ = "request_path_usage"
+
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("observed_requests.id", ondelete="CASCADE"), primary_key=True,
+    )
+    path_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("query_paths.id", ondelete="RESTRICT"), primary_key=True, index=True,
     )
 
 
