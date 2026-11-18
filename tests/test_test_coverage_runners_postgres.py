@@ -143,7 +143,8 @@ test.skip('skipped', async () => {});
 async def test_external_runner_persists_real_results_and_fields(runner_backend, tmp_path, framework):
     client, run_id, base, key = runner_backend
     env = {**os.environ, "COVERAGE_TEST_RUN_ID": run_id, "COVERAGE_URL": base, "COVERAGE_API_KEY": key,
-           "PYTHONPATH": str(ROOT / "integrations/python/src"), "PYTHONDONTWRITEBYTECODE": "1"}
+           "PYTHONPATH": str(ROOT / "integrations/python/src"), "PYTHONDONTWRITEBYTECODE": "1",
+           "PYTHONUTF8": "1", "COVERAGE_TEAM_KEY": "checkout", "COVERAGE_SUITE_KEY": "regression"}
     env.pop("PYTEST_ADDOPTS", None)
     if framework == "pytest":
         (tmp_path / "test_external.py").write_text(PYTEST_SOURCE, encoding="utf-8")
@@ -168,6 +169,14 @@ async def test_external_runner_persists_real_results_and_fields(runner_backend, 
     rows = response.json()
     assert {row["framework"] for row in rows} == {framework}
     assert len({row["id"] for row in rows}) == len(rows)
+    assert all(row["teamKey"] == "checkout" and row["suiteKey"] == "regression" for row in rows)
+    group, = (await client.get(f"/api/runs/{run_id}/test-coverage/groups")).json()
+    assert group["key"] == "regression"
+    assert group["totalExecutions"] == len(rows)
+    assert group["totalTests"] == len({row["testId"] for row in rows})
+    assert group["requestCount"] == sum(row["requestCount"] for row in rows)
+    assert group["coveredFieldCount"] == group["observedFieldCount"] == 1
+    assert group["coveragePercent"] == 100
     assert Counter(row["status"] for row in rows) == (
         Counter(passed=1, failed=2, skipped=1) if framework == "pytest" else Counter(passed=2, failed=5, skipped=1))
     for row in rows:

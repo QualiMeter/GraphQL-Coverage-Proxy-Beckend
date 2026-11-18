@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import text
 
 from test_test_coverage_postgres import context, exchange, finish
-from test_graphql_proxy import upstream
+from test_graphql_proxy import upstream, raw_response
 from test_multi_service_postgres import isolated_database, routed_client
 from test_browser_auth_postgres import auth_context, grant, login
 from test_postgres_integration import postgres_session
@@ -157,6 +157,55 @@ async def test_same_suite_in_other_snapshot_does_not_change_group_coverage(conte
     assert first_row["totalFields"] == 4 and first_row["coveredFieldCount"] == 2
     assert other_row["totalFields"] == other_row["coveredFieldCount"] == 1
     assert first_row["requestCount"] == other_row["requestCount"] == 1
+
+
+@pytest.mark.parametrize("body,covered,observed,unavailable", [
+    (b'{"data":{"user":{"name":null}}}', 3, 2, 0),
+    (b'{"data":null,"errors":[{}]}', 0, 0, 0),
+    (b'{}', 0, 0, 1),
+])
+async def test_selected_and_observed_counts_remain_separate(
+    context, upstream, body, covered, observed, unavailable,
+):
+    client, _, run_id, _ = context
+    upstream(lambda request: raw_response(body=body))
+    execution, _ = await register(client, run_id)
+    assert (await exchange(client, run_id, execution["id"])).status_code == 200
+    row, = (await client.get(f"/api/runs/{run_id}/test-coverage/groups")).json()
+    assert row["selectedFieldCount"] == 3
+    assert row["coveredFieldCount"] == covered
+    assert row["observedFieldCount"] == observed
+    assert row["unavailableEvidenceRequestCount"] == unavailable
+    fields = (await client.get(f"/api/runs/{run_id}/test-coverage/fields")).json()
+    assert sum(field["observedCount"] for field in fields) == observed
+    if body == b'{"data":null,"errors":[{}]}':
+        assert all(field["indeterminateCount"] == 1 for field in fields)
+
+
+async def test_group_percentage_uses_only_object_fields(context, upstream):
+    from app.services import create_service, create_run, import_sdl
+    client, sessions, _, _ = context
+    async with sessions() as session:
+        service = await create_service(
+            session, "interfaces-" + uuid.uuid4().hex, "Interfaces",
+            endpoint_url="https://93.184.216.34/graphql",
+        )
+        snapshot = await import_sdl(session, service.id, """
+            type Query { node: Node }
+            interface Node { id: ID }
+            type User implements Node { id: ID name: String }
+        """)
+        run = await create_run(session, snapshot.id, "Interface group", {})
+    run_id = str(run.id)
+    upstream(lambda request: raw_response(body=b'{"data":{"node":{"id":"1"}}}'))
+    execution, _ = await register(client, run_id)
+    assert (await exchange(client, run_id, execution["id"], "{ node { id } }")).status_code == 200
+    row, = (await client.get(f"/api/runs/{run_id}/test-coverage/groups")).json()
+    assert row["selectedFieldCount"] == row["observedFieldCount"] == 2
+    assert row["coveredFieldCount"] == 1 and row["totalFields"] == 3
+    assert row["coveragePercent"] == 33.33
+    graph = (await client.get(f"/api/runs/{run_id}/coverage")).json()
+    assert graph["summary"]["coveragePercent"] == row["coveragePercent"]
 
 
 async def test_group_migration_preserves_existing_executions_and_requests(context):
