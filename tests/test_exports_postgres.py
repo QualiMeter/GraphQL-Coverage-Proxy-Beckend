@@ -370,6 +370,38 @@ async def test_operation_table_filters_and_grouped_request_errors(exports_contex
         assert exported.json()["rows"] == source.json() and exported.json()["rowCount"] == 1
 
 
+async def test_exports_preserve_team_and_suite_filters_from_main(exports_context):
+    client, sessions, _, _, run, first, second = exports_context
+    async with sessions.begin() as session:
+        execution = await session.get(Execution, uuid.UUID(first["id"]))
+        execution.team_key = "payments"
+        execution.suite_key = "smoke"
+    base = f"/api/runs/{run.id}"
+    for query, expected in (
+        ({"teamKey": "payments"}, {first["id"]}),
+        ({"suiteKey": "smoke"}, {first["id"]}),
+        ({"unassignedTeam": True}, {second["id"]}),
+        ({"unassignedSuite": True}, {second["id"]}),
+        ({"teamKey": "payments", "suiteKey": "regression"}, set()),
+    ):
+        source = await client.get(base + "/tests", params=query)
+        for dataset, id_key in (("tests", "id"), ("test-matrix", "executionId")):
+            for format in ("json", "csv"):
+                response = await client.get(base + "/exports/" + dataset, params={**query, "format": format})
+                assert response.status_code == 200, response.text
+                if format == "json":
+                    rows = response.json()["rows"]
+                    if dataset == "tests":
+                        assert rows == source.json()
+                else:
+                    rows = [row for row in csv.DictReader(io.StringIO(response.content.decode("utf-8-sig")))
+                            if row["recordType"] == "data"]
+                assert {row[id_key] for row in rows} == expected
+                for row in rows:
+                    if row[id_key] == first["id"]:
+                        assert (row["teamKey"], row["suiteKey"]) == ("payments", "smoke")
+
+
 def test_committed_json_schema_matches_openapi_model():
     from pathlib import Path
     schema = json.loads((Path(__file__).resolve().parents[1] / "docs/export-format-v1.schema.json").read_text(encoding="utf-8"))

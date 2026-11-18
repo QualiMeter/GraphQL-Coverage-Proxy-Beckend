@@ -135,8 +135,8 @@ async def tests_export(session, run, filters, writer, metadata):
 
 async def matrix_export(session, run, filters, writer, metadata):
     selected = execution_query(run.id, run.snapshot_id, filters).with_only_columns(TestExecution.id).order_by(None)
-    field_rows = execution_fields_query(run.id).subquery()
-    execution_columns = ("test_id", "name", "framework", "attempt", "status")
+    field_rows = execution_fields_query(run.id, run.snapshot_id, per_execution=True).subquery()
+    execution_columns = ("test_id", "name", "framework", "attempt", "status", "team_key", "suite_key")
     statement = (select(*field_rows.c,
         *[getattr(TestExecution, name) for name in execution_columns])
         .join(TestExecution, TestExecution.id == field_rows.c.execution_id)
@@ -147,12 +147,13 @@ async def matrix_export(session, run, filters, writer, metadata):
     if filters.field_name is not None:
         statement = statement.where(field_rows.c.field_name == filters.field_name)
     await writer.start("test-matrix", metadata, effective_filters(filters), {},
-        ["executionId", "testId", "name", "framework", "attempt", "status", *columns(ExecutionFieldOut)],
+        ["executionId", "testId", "name", "framework", "attempt", "status", "teamKey", "suiteKey", *columns(ExecutionFieldOut)],
         await row_count(session, statement))
 
     def convert(row):
         return {
             "executionId": str(row["execution_id"]), "testId": row["test_id"],
+            "teamKey": row["team_key"], "suiteKey": row["suite_key"],
             **{key: row[key] for key in ("name", "framework", "attempt", "status")},
             **ExecutionFieldOut(**row).model_dump(mode="json", by_alias=True),
         }

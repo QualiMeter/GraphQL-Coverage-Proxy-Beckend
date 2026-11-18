@@ -8,10 +8,12 @@ from app.access import require_analyst, require_operator
 from app.auth import Principal, visibility_kwargs
 from app.database import get_session
 from app.services import ConflictError, NotFoundError, ensure_visible_run
+from app.test_groups import GroupFilters, GroupPageFilters, GroupCoverage, group_coverage
 from app.test_executions import (
     ExecutionBusy, ExecutionCreate, ExecutionFieldOut, ExecutionFilters, ExecutionFinish, ExecutionOut,
     TestCoverageSummary, coverage_summary, create_execution, execution_detail, execution_fields,
     execution_page, finish_execution,
+    get_run,
 )
 
 router = APIRouter(prefix="/api/runs", tags=["Test Coverage"], responses={
@@ -92,5 +94,36 @@ async def test_coverage(run_id: uuid.UUID, session: AsyncSession = Depends(get_s
     try:
         await authorized(session, run_id, principal)
         return await coverage_summary(session, run_id)
+    except NotFoundError as exc:
+        raise api_error(exc) from None
+
+
+@router.get("/{run_id}/test-coverage/groups", response_model=list[GroupCoverage])
+async def test_groups(
+    run_id: uuid.UUID, response: Response, filters: Annotated[GroupPageFilters, Query()],
+    session: AsyncSession = Depends(get_session), principal: Principal = Depends(require_analyst),
+):
+    try:
+        await authorized(session, run_id, principal)
+        run = await get_run(session, run_id)
+        rows, total = await group_coverage(session, run, filters)
+        response.headers["X-Total-Count"] = str(total)
+        return rows
+    except NotFoundError as exc:
+        raise api_error(exc) from None
+
+
+@router.get("/{run_id}/test-coverage/fields", response_model=list[ExecutionFieldOut])
+async def group_fields(
+    run_id: uuid.UUID, response: Response, filters: Annotated[GroupFilters, Query()],
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    session: AsyncSession = Depends(get_session), principal: Principal = Depends(require_analyst),
+):
+    try:
+        await authorized(session, run_id, principal)
+        rows, total = await execution_fields(session, run_id, None, limit, offset, groups=filters)
+        response.headers["X-Total-Count"] = str(total)
+        return rows
     except NotFoundError as exc:
         raise api_error(exc) from None

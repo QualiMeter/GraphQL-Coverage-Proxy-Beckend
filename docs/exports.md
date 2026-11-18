@@ -54,7 +54,7 @@ Invoke-WebRequest "$baseUrl/api/runs/$runId/exports/coverage?format=csv&covered=
 | Coverage | `typeName`, `fieldName`, `covered`, `search`, `minHits`, `maxHits`, `returns=scalar/object/list`, `deprecated`; `fieldName` требует `typeName` |
 | Operations | `operationName`, `operationType`, `search`, `typeName`, `fieldName`, `hasErrors`, `sortBy=identity/count/duration/errors`, `sortOrder=asc/desc` |
 | Requests | Все параметры `RequestFilters`: тест, операция, тип/поле, ошибки, HTTP-статус, период и сортировка; дополнительно `errorGroup=http/analyzer` |
-| Tests | `status`, `framework`, `testId`, `typeName`, `fieldName`, `fieldMode=covered/selected/observed` |
+| Tests | `status`, `framework`, `testId`, `typeName`, `fieldName`, `fieldMode=covered/selected/observed`, `teamKey`, `suiteKey`, `unassignedTeam`, `unassignedSuite` |
 | Test matrix | Те же фильтры тестов; при заданном типе/поле строки матрицы также ограничены этими координатами |
 | Comparison | Тело `RunComparisonRequest`, включая `fields.filter`; пагинация `fields` и `types` игнорируется |
 
@@ -129,6 +129,9 @@ Test matrix содержит одну строку на попытку тест�
 Строки operations соответствуют `OperationOut`, requests — `RequestOut`,
 tests — `ExecutionOut`. В матрице к `ExecutionFieldOut` добавлены
 `executionId`, `testId`, `name`, `framework`, `attempt`, `status`.
+Дополнительно передаются `teamKey` и `suiteKey`; у неразмеченных попыток
+они равны `null` в JSON и пустой ячейке в CSV. Фильтры команд/наборов
+используют те же правила, что [Team/Suite Coverage](team-suite-coverage.md).
 У comparison строки соответствуют `ComparedFieldOut`; `summary` содержит
 `baselineRunId`, `targetRunId`, метрики `runs`, `comparison`, `fieldCategories`
 и все `types`. Проценты, дельты и категории рассчитывает существующий механизм
