@@ -656,3 +656,11 @@ export async function getPublicServices() {
 `Authorization`; первый связывает операцию с активным E2E-прогоном.
 Не отправляйте `X-Coverage-Api-Key` в браузере, даже если Swagger позволяет
 вручную авторизоваться: секрет доступен владельцам серверного окружения.
+
+## Argument Usage
+
+Protected run analytics: `GET /api/runs/{runId}/arguments`, with independent
+`typeName`, `fieldName`, `argumentName` filters and `limit`/`offset` pagination.
+The full response example, category semantics and availability rendering rules
+are in [argument-usage.md](argument-usage.md). This does not change Schema
+Coverage percentages. Never render unavailable historical collection as zero use.

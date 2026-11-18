@@ -173,6 +173,7 @@ class ObservedRequest(Base):
             AND octet_length(graphql_error_details::text) <= 16384
             AND graphql_has_errors IS NOT NULL AND graphql_has_errors = (graphql_error_count > 0))
             """, name="valid_graphql_error_details"),
+        CheckConstraint("argument_usage_version IS NULL OR argument_usage_version = 1", name="valid_argument_usage_version"),
         CheckConstraint("field_evidence_version IS NULL OR field_evidence_version = 1", name="valid_field_evidence_version"),
         Index("ix_requests_run_created_id", "run_id", "created_at", "id"),
         Index("ix_requests_run_duration_id", "run_id", "duration_ms", "id"),
@@ -191,6 +192,7 @@ class ObservedRequest(Base):
         CheckConstraint("max_depth IS NULL OR max_depth BETWEEN 0 AND 64", name="valid_analysis_max_depth"),
     )
 
+    argument_usage_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     field_evidence_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     test_execution_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
@@ -241,6 +243,27 @@ class RequestFieldUsage(Base):
         PG_UUID(as_uuid=True), ForeignKey("schema_fields.id", ondelete="RESTRICT"), primary_key=True,
         index=True,
     )
+
+
+class RequestArgumentUsage(Base):
+    """One category per request and canonical schema argument.
+
+    Snapshot and run are obtained through the existing request/field relations.
+    Argument definitions remain in immutable snapshot SDL (no duplicate catalog).
+    """
+    __tablename__ = "request_argument_usage"
+    __table_args__ = (
+        CheckConstraint("state IN ('omitted', 'explicit_null', 'provided', 'unknown', 'mixed')",
+                        name="valid_argument_usage_state"),
+        Index("ix_argument_usage_field_argument_state", "field_id", "argument_name", "state"),
+    )
+
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("observed_requests.id", ondelete="CASCADE"), primary_key=True)
+    field_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("schema_fields.id", ondelete="RESTRICT"), primary_key=True)
+    argument_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
 class QueryPath(Base):
