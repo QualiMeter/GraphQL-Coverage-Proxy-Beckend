@@ -9,6 +9,23 @@ async function fixture(options, use) {
   await fixtures.coverage[0]({}, coverage => use(coverage, info), info);
 }
 
+test('fixture registration sends team and primary suite', async () => {
+  const original = global.fetch;
+  const payloads = [];
+  global.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    payloads.push(body);
+    return new Response(JSON.stringify({id: body.id, runId: 'run'}), {status: 201});
+  };
+  try {
+    await fixture({
+      baseURL: 'http://coverage.test', apiKey: 'test-key', teamKey: 'checkout', suiteKey: 'smoke',
+    }, coverage => coverage.trackRun('run'));
+    assert.equal(payloads[0].teamKey, 'checkout');
+    assert.equal(payloads[0].suiteKey, 'smoke');
+  } finally { global.fetch = original; }
+});
+
 test('parallel trackRun shares registration and retry retains UUID', async () => {
   const original = global.fetch;
   const ids = [];

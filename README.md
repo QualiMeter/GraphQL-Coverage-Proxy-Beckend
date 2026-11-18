@@ -13,6 +13,8 @@ HTTP-прокси направляет запросы в выбранный се
 - [Test Coverage](docs/test-coverage.md): привязка обращений к попыткам
   pytest/Playwright, результаты passed/failed/skipped/interrupted, поля каждого
   теста и поиск тестов по полю.
+- [Команды и наборы](docs/team-suite-coverage.md): групповые агрегаты,
+  фильтрация по teamKey/suiteKey и покрытие внутри снимка схемы.
 - [Клиентские адаптеры](integrations/README.md) pytest и Playwright для
   подключения своих тестов без установки QA-панели.
 - Browser-сессии, роли viewer/analyst/operator/admin, grants и CSRF;

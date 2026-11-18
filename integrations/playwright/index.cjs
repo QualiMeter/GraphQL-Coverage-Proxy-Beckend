@@ -11,6 +11,13 @@ function settings(options = {}) {
   return {base: url.toString().replace(/\/$/, ''), key};
 }
 
+function groups(options) {
+  return {
+    teamKey: options.teamKey ?? process.env.COVERAGE_TEAM_KEY,
+    suiteKey: options.suiteKey ?? process.env.COVERAGE_SUITE_KEY,
+  };
+}
+
 async function metadata(config, method, path, body) {
   for (let attempt = 0; attempt < 3; attempt++) {
     let response;
@@ -78,7 +85,7 @@ class CoverageReporter {
       const promise = Promise.resolve().then(async () => {
         const config = settings(this.options);
         confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(runId)}/tests`, {
-          id, testId, name, framework: 'playwright', attempt,
+          id, testId, name, framework: 'playwright', attempt, ...groups(this.options),
         }), id, runId);
         await finish(config, {id, runId}, result);
       }).catch(error => { this.errors.push(error.message); });
@@ -135,7 +142,7 @@ function createCoverageTest(baseTest, options = {}) {
               const testId = (info.testId || info.titlePath.join('::')) + (info.repeatEachIndex ? `:repeat=${info.repeatEachIndex}` : '');
               const name = Array.from(info.titlePath.join(' › ').trim()).slice(0, 512).join('');
               const attempt = info.retry + 1;
-              const registration = {id, testId, name, framework: 'playwright', attempt};
+              const registration = {id, testId, name, framework: 'playwright', attempt, ...groups(options)};
               // Publish identity before the first byte is sent. Reporter sees it even
               // when automatic fixture setup fails before reaching use().
               if (!info.annotations.some(item => item.type === 'coverage.execution' && JSON.parse(item.description).id === id)) {
