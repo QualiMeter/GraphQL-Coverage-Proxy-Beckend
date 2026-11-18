@@ -60,3 +60,35 @@ test('GraphQL helper never follows upstream Location with API key', async () => 
     });
   } finally { await context.dispose(); await new Promise(resolve => server.close(resolve)); }
 });
+
+test('reporter recovers registration after every fixture response was lost after commit', async () => {
+  const Reporter = require('./index.cjs');
+  const original = global.fetch;
+  const ids = [];
+  const info = {testId: 'test', titlePath: ['suite', 'test'], retry: 0, annotations: []};
+  let lost = true;
+  let state;
+  global.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (url.endsWith('/tests')) {
+      ids.push(body.id);
+      if (!state) state = {id: body.id, runId: 'run', status: 'running'};
+      if (state.id !== body.id) return new Response('{}', {status: 409});
+      if (lost) throw new Error('response lost after commit');
+    } else {
+      state.status = body.status;
+    }
+    return new Response(JSON.stringify(state), {status: 200});
+  };
+  try {
+    const fixtures = createCoverageTest({extend: f => f}, {baseURL: 'http://coverage.test', apiKey: 'key', runId: 'run'});
+    await assert.rejects(fixtures.coverage[0]({}, async () => {}, info));
+    lost = false;
+    const reporter = new Reporter({baseURL: 'http://coverage.test', apiKey: 'key', runId: 'run'});
+    reporter.onTestEnd({id: 'test', titlePath: () => info.titlePath, annotations: info.annotations},
+      {retry: 0, status: 'failed', duration: 1, annotations: info.annotations});
+    assert.equal(await reporter.onEnd(), undefined);
+    assert.equal(new Set(ids).size, 1);
+    assert.equal(state.status, 'failed');
+  } finally { global.fetch = original; }
+});

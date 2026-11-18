@@ -33,7 +33,7 @@ async function metadata(config, method, path, body) {
       throw error;
     }
     try { return await response.json(); }
-    catch { throw new Error('Coverage metadata response is not JSON'); }
+    catch { if (attempt < 2) continue; throw new Error('Coverage metadata response is not JSON'); }
   }
 }
 
@@ -68,7 +68,7 @@ class CoverageReporter {
   }
 
   onTestEnd(test, result) {
-    const annotations = result.annotations || test.annotations || [];
+    const annotations = [...(test.annotations || []), ...(result.annotations || [])];
     const runId = this.options.runId || process.env.COVERAGE_TEST_RUN_ID;
     if (!annotations.some(item => item.type === 'coverage.execution') && runId) {
       const id = randomUUID();
@@ -91,7 +91,16 @@ class CoverageReporter {
       catch { this.errors.push('Invalid Coverage execution annotation'); continue; }
       if (annotation.attempt !== result.retry + 1 || this.seen.has(annotation.id)) continue;
       this.seen.add(annotation.id);
-      const promise = Promise.resolve().then(() => finish(settings(this.options), annotation, result))
+      const promise = Promise.resolve().then(async () => {
+        const config = settings(this.options);
+        // A fixture may have lost every response after the registration committed.
+        // Recover using its original UUID and metadata before submitting the result.
+        if (annotation.registration) {
+          confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(annotation.runId)}/tests`,
+            annotation.registration), annotation.id, annotation.runId);
+        }
+        return finish(config, annotation, result);
+      })
         .catch(error => { this.errors.push(error.message); });
       this.pending.push(promise);
     }
@@ -118,17 +127,21 @@ function createCoverageTest(baseTest, options = {}) {
             executions.set(runId, entry);
           }
           if (!entry.pending) {
-            // Install the promise before registration yields. Retain the UUID
-            // even after a network failure: POST may already have committed.
+            // Cache the registration before awaiting. Keep the UUID after a
+            // transient error: the server may have committed the first POST.
             entry.pending = Promise.resolve().then(async () => {
               const config = settings(options);
               const id = entry.id;
               const testId = (info.testId || info.titlePath.join('::')) + (info.repeatEachIndex ? `:repeat=${info.repeatEachIndex}` : '');
               const name = Array.from(info.titlePath.join(' › ').trim()).slice(0, 512).join('');
               const attempt = info.retry + 1;
-              confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(runId)}/tests`, {
-                id, testId, name, framework: 'playwright', attempt,
-              }), id, runId);
+              const registration = {id, testId, name, framework: 'playwright', attempt};
+              // Publish identity before the first byte is sent. Reporter sees it even
+              // when automatic fixture setup fails before reaching use().
+              if (!info.annotations.some(item => item.type === 'coverage.execution' && JSON.parse(item.description).id === id)) {
+                info.annotations.push({type: 'coverage.execution', description: JSON.stringify({id, runId, attempt, registration})});
+              }
+              confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(runId)}/tests`, registration), id, runId);
               const headers = {'X-Coverage-Run-Id': runId, 'X-Coverage-Test-Execution-Id': id};
               const execution = {id, runId, headers,
                 post(request, data) {
@@ -137,7 +150,6 @@ function createCoverageTest(baseTest, options = {}) {
                   });
                 },
               };
-              info.annotations.push({type: 'coverage.execution', description: JSON.stringify({id, runId, attempt})});
               return execution;
             }).catch(error => { entry.pending = null; throw error; });
           }
