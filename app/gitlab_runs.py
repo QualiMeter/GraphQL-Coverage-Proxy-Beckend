@@ -47,6 +47,7 @@ async def prepare_launch(session, settings: GitLabSettings, service_id, snapshot
     stamp = now()
     row = GitLabPipeline(
         run_id=run.id, gitlab_host=settings.host, project_id=project, ref=ref,
+        environment=settings.environments.get(service_id),
         pipeline_status="creating", created_at=stamp,
         deadline_at=stamp + timedelta(seconds=settings.max_run_seconds), next_check_at=stamp,
         lease_token=uuid.uuid4(), lease_until=stamp + timedelta(seconds=LEASE_SECONDS),
@@ -93,7 +94,11 @@ async def apply_result(sessions, item: Work, settings: GitLabSettings, *, info: 
         if info is None and row.pipeline_id is None and not rejected:
             row.pipeline_status = "launch_unknown"
         if info is not None:
+            if row.pipeline_id is None:
+                row.jobs_next_check_at = stamp
             row.pipeline_id, row.pipeline_url, row.pipeline_status = info.id, info.url, info.status
+            if info.commit_sha is not None:
+                row.commit_sha = info.commit_sha
             if not row.collection_incomplete:
                 row.error_code = None
             row.check_failures = 0
@@ -110,6 +115,12 @@ async def apply_result(sessions, item: Work, settings: GitLabSettings, *, info: 
                 await finish_run(session, item.run_id, pipeline_managed=True,
                                  status="failed" if rejected or row.collection_incomplete else "completed", commit=False)
             row.finished_at = stamp
+            if row.pipeline_id is not None:
+                # Refresh the full list after completion. An in-flight active
+                # page cannot overwrite this schedule with an older sample.
+                row.jobs_next_check_at = stamp
+                row.jobs_page = 1
+                row.jobs_lease_token = None
         elif stamp >= row.deadline_at:
             # Stop collection on a finite deadline, retain observations, and keep
             # reconciling GitLab. The unfinished link quarantines this snapshot
@@ -150,6 +161,8 @@ async def poll_once(sessions, settings: GitLabSettings, client: GitLabClient) ->
                 info, page = await client.reconcile(item.project, item.ref, item.run_id, item.created_at, item.page)
             else:
                 info, page = await client.pipeline(item.project, item.pipeline_id), None
+                if info.ref is not None and info.ref != item.ref:
+                    raise GitLabError("gitlab_invalid_response")
         await apply_result(sessions, item, settings, info=info, page=page)
     except (GitLabError, TimeoutError) as exc:
         error = exc if isinstance(exc, GitLabError) else GitLabError("gitlab_network_error")

@@ -4,6 +4,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.access import require_role
@@ -15,7 +16,7 @@ from app.diagnostics import internal_failure
 from app.gitlab_client import GitLabClient, GitLabError
 from app.gitlab_config import GitLabConfigurationError, gitlab_settings
 from app.gitlab_runs import apply_result, launch, prepare_launch
-from app.models import GitLabPipeline, TestRun
+from app.models import GitLabJob, GitLabPipeline, TestRun
 from app.services import ConflictError, NotFoundError, ensure_visible_run, ensure_visible_service
 
 router = APIRouter(prefix="/api", tags=["GitLab E2E"], responses={
@@ -63,14 +64,43 @@ class PipelineOut(ApiModel):
     finished_at: datetime | None
     collection_incomplete: bool = Field(description="Collection stopped before a trustworthy terminal outcome; observations are retained and this flag never clears.")
     tracking_finished: bool
+    project_id: int | None = None
+    branch: str | None = None
+    commit_sha: str | None = None
+    environment: str | None = None
+
+
+class JobOut(ApiModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    job_id: int
+    name: str
+    stage: str
+    status: str
+    url: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class JobPageOut(ApiModel):
+    run_id: uuid.UUID
+    pipeline_id: int | None
+    jobs_synced_at: datetime | None
+    jobs_finalized: bool
+    total: int
+    jobs: list[JobOut]
 
 
 def output(row, run):
+    confirmed = row.pipeline_id is not None
     return PipelineOut(run_id=row.run_id, pipeline_id=row.pipeline_id, pipeline_url=row.pipeline_url,
                        pipeline_status=row.pipeline_status, run_status=run.status,
                        error_code=row.error_code, created_at=row.created_at, finished_at=row.finished_at,
                        collection_incomplete=row.collection_incomplete,
-                       tracking_finished=row.finished_at is not None)
+                       tracking_finished=row.finished_at is not None,
+                       project_id=row.project_id if confirmed else None, branch=row.ref if confirmed else None,
+                       commit_sha=row.commit_sha if confirmed else None, environment=row.environment if confirmed else None)
 
 
 def settings():
@@ -162,3 +192,31 @@ async def get_gitlab_branches(service_id: uuid.UUID, page: int = Query(default=1
     except SQLAlchemyError as exc:
         internal_failure("gitlab_branches_storage", exc, service_id=service_id)
         raise HTTPException(503, "GitLab service storage unavailable") from None
+
+
+@router.get("/runs/{run_id}/gitlab/jobs", response_model=JobPageOut,
+            description="Stored GitLab jobs, newest job ID first. Requires a service grant or admin access.")
+async def get_gitlab_jobs(
+    run_id: uuid.UUID, limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0),
+    sessions=Depends(get_session_factory), principal: Principal = Depends(viewer),
+):
+    try:
+        async with sessions() as session:
+            await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
+            pipeline = await session.get(GitLabPipeline, run_id)
+            if pipeline is None:
+                raise NotFoundError("GitLab pipeline not found")
+            scope = GitLabJob.run_id == run_id
+            total = await session.scalar(select(func.count()).select_from(GitLabJob).where(scope))
+            jobs = (await session.scalars(select(GitLabJob).where(scope)
+                    .order_by(GitLabJob.job_id.desc()).limit(limit).offset(offset))).all()
+            return JobPageOut(
+                run_id=run_id, pipeline_id=pipeline.pipeline_id, jobs_synced_at=pipeline.jobs_synced_at,
+                jobs_finalized=pipeline.jobs_synced_at is not None and pipeline.jobs_next_check_at is None,
+                total=total, jobs=[JobOut.model_validate(job) for job in jobs],
+            )
+    except NotFoundError as exc:
+        raise HTTPException(404, str(exc)) from None
+    except SQLAlchemyError as exc:
+        internal_failure("gitlab_jobs_storage", exc, run_id=run_id)
+        raise HTTPException(503, "GitLab jobs storage unavailable") from None

@@ -24,6 +24,42 @@ class PipelineInfo:
     id: int
     url: str
     status: str
+    commit_sha: str | None = None
+    ref: str | None = None
+
+
+COMMIT_SHA_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+JOBS_PAGE_SIZE = 50
+
+
+@dataclass(frozen=True)
+class JobInfo:
+    job_id: int
+    name: str
+    stage: str
+    status: str
+    url: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+def gitlab_id(value):
+    return type(value) is int and 0 < value < 2**63
+
+
+def label(value, max_length):
+    return (isinstance(value, str) and 1 <= len(value) <= max_length
+            and all(ord(c) >= 32 and ord(c) != 127 for c in value))
+
+
+def job_timestamp(value):
+    if not isinstance(value, str) or len(value) > 40:
+        raise ValueError
+    stamp = datetime.fromisoformat(value)
+    if stamp.utcoffset() is None:
+        raise ValueError
+    return stamp
 
 
 class GitLabClient:
@@ -64,17 +100,27 @@ class GitLabClient:
         except (ValueError, TypeError):
             raise GitLabError("gitlab_invalid_response", ambiguous=method == "POST") from None
 
-    def pipeline_info(self, data) -> PipelineInfo:
+    def valid_link(self, url):
+        if not isinstance(url, str) or len(url) > 2048 or any(
+            ord(c) <= 32 or ord(c) == 127 or c == "\\" for c in url
+        ):
+            return False
+        parts = urlsplit(url)
+        return (parts.scheme == "https" and parts.netloc == urlsplit(self.settings.host).netloc
+                and not parts.query and not parts.fragment and not parts.username and bool(parts.path))
+
+    def pipeline_info(self, data, *, project=None, ref=None) -> PipelineInfo:
         try:
             ident, status, url = data["id"], data["status"], data["web_url"]
-            parts = urlsplit(url)
-            if (type(ident) is not int or not 0 < ident < 2**63 or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", status)
-                    or parts.scheme != "https" or parts.netloc != urlsplit(self.settings.host).netloc
-                    or parts.query or parts.fragment or parts.username or not parts.path
-                    or len(url) > 2048
-                    or any(ord(c) <= 32 or ord(c) == 127 for c in url)):
+            sha, actual_ref = data.get("sha"), data.get("ref")
+            if (not gitlab_id(ident) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", status)
+                    or not self.valid_link(url)
+                    or (sha is not None and not re.fullmatch(COMMIT_SHA_PATTERN, sha))
+                    or (actual_ref is not None and (not label(actual_ref, 255) or (ref is not None and actual_ref != ref)))
+                    or (project is not None and data.get("project_id", project) != project)
+                    or data.get("tag") is True):
                 raise ValueError
-            return PipelineInfo(ident, url, status)
+            return PipelineInfo(ident, url, status, sha, actual_ref)
         except (ValueError, TypeError, KeyError):
             raise GitLabError("gitlab_invalid_response", ambiguous=True) from None
 
@@ -85,13 +131,42 @@ class GitLabClient:
             "ref": ref, "variables": [{"key": k, "value": v, "variable_type": "env_var"}
                                       for k, v in variables.items()],
         })
-        return self.pipeline_info(data)
+        return self.pipeline_info(data, project=project, ref=ref)
 
     async def pipeline(self, project: int, pipeline_id: int) -> PipelineInfo:
-        info = self.pipeline_info(await self.request("GET", f"projects/{project}/pipelines/{pipeline_id}"))
+        info = self.pipeline_info(await self.request("GET", f"projects/{project}/pipelines/{pipeline_id}"),
+                                  project=project)
         if info.id != pipeline_id:
             raise GitLabError("gitlab_invalid_response")
         return info
+
+    async def jobs(self, project: int, pipeline_id: int, page: int) -> tuple[list[JobInfo], bool]:
+        data = await self.request("GET", f"projects/{project}/pipelines/{pipeline_id}/jobs", params={
+            "page": page, "per_page": JOBS_PAGE_SIZE, "include_retried": "true",
+        })
+        try:
+            if not isinstance(data, list) or len(data) > JOBS_PAGE_SIZE:
+                raise ValueError
+            jobs = []
+            seen = set()
+            for item in data:
+                ident, name, stage, status, url = (
+                    item["id"], item["name"], item["stage"], item["status"], item["web_url"],
+                )
+                pipeline = item["pipeline"]
+                if (not gitlab_id(ident) or ident in seen or not label(name, 255) or not label(stage, 255)
+                        or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", status) or not self.valid_link(url)
+                        or pipeline["id"] != pipeline_id or pipeline["project_id"] != project):
+                    raise ValueError
+                seen.add(ident)
+                jobs.append(JobInfo(
+                    ident, name, stage, status, url, job_timestamp(item["created_at"]),
+                    job_timestamp(item["started_at"]) if item.get("started_at") is not None else None,
+                    job_timestamp(item["finished_at"]) if item.get("finished_at") is not None else None,
+                ))
+        except (TypeError, ValueError, KeyError):
+            raise GitLabError("gitlab_invalid_response") from None
+        return jobs, len(data) == JOBS_PAGE_SIZE
 
     async def branches(self, project: int, page: int):
         data = await self.request("GET", f"projects/{project}/repository/branches",
@@ -119,7 +194,7 @@ class GitLabClient:
         if not isinstance(data, list) or len(data) > 2:
             raise GitLabError("gitlab_invalid_response")
         for item in data:
-            info = self.pipeline_info(item)
+            info = self.pipeline_info(item, project=project, ref=ref)
             try:
                 variables = await self.request("GET", f"projects/{project}/pipelines/{info.id}/variables")
             except GitLabError as exc:

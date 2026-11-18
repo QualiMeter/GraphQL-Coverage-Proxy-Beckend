@@ -101,6 +101,19 @@ class RunCreate(ApiModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RunCiOut(ApiModel):
+    provider: Literal["gitlab"] = "gitlab"
+    project_id: int
+    branch: str
+    commit_sha: str | None
+    environment: str | None
+    pipeline_id: int
+    pipeline_url: str | None
+    pipeline_status: str
+    jobs_synced_at: datetime | None
+    jobs_finalized: bool
+
+
 class RunOut(ApiModel):
     id: uuid.UUID
     snapshot_id: uuid.UUID
@@ -109,6 +122,7 @@ class RunOut(ApiModel):
     started_at: datetime
     finished_at: datetime | None
     metadata: dict[str, Any]
+    ci: RunCiOut | None = Field(default=None, description="Confirmed GitLab provenance; visible only with service grant or admin access.")
 
 
 class SchemaArgumentOut(ApiModel):

@@ -17,19 +17,25 @@ from app.proxy import router as proxy_router
 from app.gitlab_api import router as gitlab_router
 from app.test_coverage_api import router as test_coverage_router
 from app.gitlab_config import gitlab_enabled, gitlab_settings
+from app.gitlab_history import monitor_jobs
 from app.gitlab_runs import monitor
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    task = None
+    tasks = []
     if gitlab_enabled():
-        task = asyncio.create_task(monitor(SessionFactory, gitlab_settings()), name="gitlab-monitor")
+        settings = gitlab_settings()
+        tasks = [
+            asyncio.create_task(monitor(SessionFactory, settings), name="gitlab-monitor"),
+            asyncio.create_task(monitor_jobs(SessionFactory, settings), name="gitlab-jobs-monitor"),
+        ]
     try:
         yield
     finally:
-        if task is not None:
+        for task in tasks:
             task.cancel()
+        for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
         await engine.dispose()

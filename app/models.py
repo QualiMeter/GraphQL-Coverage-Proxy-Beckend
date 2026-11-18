@@ -305,8 +305,11 @@ from app.auth_models import BrowserSession, LoginThrottle, ServiceGrant, User  #
 
 class GitLabPipeline(Base):
     __tablename__ = "gitlab_pipelines"
-    __table_args__ = (UniqueConstraint("gitlab_host", "project_id", "pipeline_id",
-                                      name="uq_gitlab_pipeline_external"),)
+    __table_args__ = (
+        UniqueConstraint("gitlab_host", "project_id", "pipeline_id", name="uq_gitlab_pipeline_external"),
+        Index("ix_gitlab_pipelines_confirmed_ref", "ref", "run_id",
+              postgresql_where=text("pipeline_id IS NOT NULL")),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("test_runs.id", ondelete="RESTRICT"), primary_key=True,
@@ -314,8 +317,10 @@ class GitLabPipeline(Base):
     gitlab_host: Mapped[str] = mapped_column(String(2048), nullable=False)
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     ref: Mapped[str] = mapped_column(String(255), nullable=False)
-    pipeline_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    pipeline_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     pipeline_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), index=True)
+    environment: Mapped[str | None] = mapped_column(String(128), index=True)
     pipeline_status: Mapped[str] = mapped_column(String(64), nullable=False, default="creating")
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -327,3 +332,23 @@ class GitLabPipeline(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reconcile_page: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     check_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    jobs_next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    jobs_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    jobs_page: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    jobs_lease_token: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+
+
+class GitLabJob(Base):
+    __tablename__ = "gitlab_jobs"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("gitlab_pipelines.run_id", ondelete="CASCADE"), primary_key=True,
+    )
+    job_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
