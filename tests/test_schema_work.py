@@ -53,8 +53,18 @@ async def test_sdl_import_runs_parser_off_loop_and_services_other_coroutines(mon
         await asyncio.gather(task, started_wait, return_exceptions=True)
 
 
-async def test_cancelled_running_work_retains_capacity_until_thread_finishes():
-    from app.schema_work import MAX_SCHEMA_WORKERS, schema_work
+@pytest.mark.parametrize('kind', ['schema', 'comparison'])
+async def test_cancelled_running_work_retains_capacity_until_thread_finishes(kind, monkeypatch):
+    from app.schema_work import MAX_SCHEMA_WORKERS, MAX_COMPARISON_WORKERS, schema_work, comparison_work
+    submissions = []
+    if kind == 'comparison':
+        from app.schema_work import _comparison_executor
+        submit = _comparison_executor.submit
+        def counted_submit(*args, **kwargs):
+            submissions.append(1)
+            return submit(*args, **kwargs)
+        monkeypatch.setattr(_comparison_executor, 'submit', counted_submit)
+        schema_work, MAX_SCHEMA_WORKERS = comparison_work, MAX_COMPARISON_WORKERS
     loop = asyncio.get_running_loop()
     entered, released = [], threading.Event()
     full = asyncio.Event()
@@ -86,6 +96,10 @@ async def test_cancelled_running_work_retains_capacity_until_thread_finishes():
         for _ in range(10):
             await asyncio.sleep(0)
         assert len(entered) == MAX_SCHEMA_WORKERS
+        if kind == 'comparison':
+            # Dedicated executor's thread limit alone could hide early slot
+            # release by queuing extra futures. No new submission is allowed.
+            assert len(submissions) == MAX_SCHEMA_WORKERS
         released.set()
         assert await asyncio.gather(*more) == list(range(12, 16))
         assert peak <= MAX_SCHEMA_WORKERS
@@ -110,3 +124,25 @@ def test_sdl_size_limit_unchanged():
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         SchemaImport(service_id=uuid.uuid4(), sdl='x' * 1_000_001)
+
+
+@pytest.mark.parametrize('kind', ['schema', 'comparison'])
+async def test_worker_preserves_context_and_releases_capacity_after_error(kind):
+    from contextvars import ContextVar
+    from app.schema_work import schema_work, comparison_work
+    worker = comparison_work if kind == 'comparison' else schema_work
+    marker = ContextVar('worker-test-marker', default='missing')
+    token = marker.set('request-context')
+    def check(fail=False):
+        assert marker.get() == 'request-context'
+        if kind == 'comparison':
+            assert threading.current_thread().name.startswith('coverage-comparison')
+        if fail:
+            raise ValueError('worker failure')
+        return 42
+    try:
+        with pytest.raises(ValueError, match='worker failure'):
+            await worker(check, True)
+        assert await worker(check) == 42
+    finally:
+        marker.reset(token)

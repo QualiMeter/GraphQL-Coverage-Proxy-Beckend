@@ -11,6 +11,7 @@ from app.graphql_errors import ErrorSummary
 AnalysisStatus = Literal[
     "success", "parse_error", "validation_error", "unsupported", "internal_error"
 ]
+RunStatus = Literal["running", "completed", "failed"]
 OperationType = Literal["query", "mutation", "subscription"]
 EvidenceState = Literal["observed", "not_observed", "indeterminate", "unavailable"]
 

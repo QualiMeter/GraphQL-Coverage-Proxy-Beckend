@@ -100,3 +100,14 @@ def test_schema_payload_limits_and_validation_never_echo_source(monkeypatch):
         assert client.patch('/api/schemas/00000000-0000-0000-0000-000000000001',content=b'x'*16_385).status_code==413
         response=client.post('/api/schemas/import',json={'serviceId':'bad','sdl':'secret-schema-source'})
         assert response.status_code==422 and 'secret-schema-source' not in response.text
+
+
+def test_openapi_history_statuses_and_safe_document_description():
+    from app.main import app
+    schema = app.openapi()
+    params = schema['paths']['/api/runs']['get']['parameters']
+    status = next(p for p in params if p['name'] == 'status')
+    assert status['schema']['anyOf'][0]['enum'] == ['running', 'completed', 'failed']
+    detail = schema['paths']['/api/runs/{run_id}/requests/{request_id}']['get']['description']
+    assert 'safeGraphqlDocument' in detail and 'Raw GraphQL bodies and variables are never stored' in detail
+    assert 'original secrets and argument values are never exposed' in detail

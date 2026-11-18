@@ -282,6 +282,7 @@ class GitLabPipeline(Base):
     pipeline_status: Mapped[str] = mapped_column(String(64), nullable=False, default="creating")
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    collection_incomplete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)

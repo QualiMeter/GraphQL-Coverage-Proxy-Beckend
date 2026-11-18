@@ -90,6 +90,12 @@ async def capture_e2e_exchange(
     This function receives in-memory copies solely for analysis.
     """
     snapshot = await load_run_snapshot(session, run_id)
+    schema_sdl = snapshot.schema_sdl
+    # This function owns the observation transaction (it commits below). End
+    # its read phase before any analyzer/CPU work or worker-capacity wait. Close
+    # resets the session; record_observation starts a fresh transaction and
+    # locks/rechecks the run, so finish during analysis still prevents a write.
+    await session.close()
 
     gql_input = parse_graphql_request(request_body)
     query_hash: str | None = None
@@ -113,7 +119,7 @@ async def capture_e2e_exchange(
                 # Optional safe representation must never invalidate an executed mutation.
                 safe_document = SafeDocument()
             try:
-                analysis = await analyzer(gql_input, snapshot.schema_sdl)
+                analysis = await analyzer(gql_input, schema_sdl)
             except Exception as exc:
                 internal_failure("analyzer", exc)
                 # An analyzer failure must not create fake coverage or persist
@@ -131,7 +137,7 @@ async def capture_e2e_exchange(
         summary = ErrorSummary(count=await schema_work(error_count, payload))
         summary = await schema_work(
             sanitize_errors, payload, gql_input.query if gql_input else None,
-            gql_input.operation_name if gql_input else None, snapshot.schema_sdl,
+            gql_input.operation_name if gql_input else None, schema_sdl,
         )
     except Exception:
         # Never emit upstream exceptions; CancelledError still propagates.

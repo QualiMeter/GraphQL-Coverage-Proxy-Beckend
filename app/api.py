@@ -20,7 +20,7 @@ from app.database import get_session, get_session_factory
 from app.diagnostics import internal_failure
 from app.run_analytics import get_run_stats, list_operations
 from app.evidence_analytics import EvidenceFilters, FieldEvidencePage, get_field_evidence
-from app.run_comparison import RunComparisonError, compare_run_series
+from app.run_comparison import RunComparisonError, compare_run_series, load_run_comparison
 from app.path_analytics import get_run_paths
 from app.schema_collector import SchemaCollectionError
 from app.schema_work import schema_work
@@ -271,6 +271,7 @@ async def post_run(payload: RunCreate, session: AsyncSession = Session,
 
 @router.get("/runs", response_model=list[RunOut], responses=TOTAL_RESPONSE,
             description="Exactly one snapshotId or serviceId. UTC [from,to), startedAt DESC/id DESC. "
+                        "Status accepts running, completed or failed. "
                         "Omitted limit returns all matches for legacy compatibility. Metadata only for admin/CLI.")
 async def get_runs(
     response: Response, filters: Annotated[RunFilters, Query()],
@@ -313,7 +314,10 @@ async def post_run_comparison(
                 if principal.token is not None:
                     from app.auth import check_csrf
                     check_csrf(request, principal)
-                return await compare_run_series(session, payload, principal)
+                data = await load_run_comparison(session, payload, principal)
+        # Release the repeatable-read snapshot and pool connection before CPU
+        # work, including time queued for the shared worker capacity.
+        return await compare_run_series(data, payload)
     except RunComparisonError as exc:
         return JSONResponse(status_code=409, content={"detail": exc.detail, "code": exc.code})
     except NotFoundError as exc:
@@ -433,7 +437,9 @@ async def get_requests(
 
 @router.get("/runs/{run_id}/requests/{request_id}", response_model=RequestDetailOut,
             responses={404: {"description": "Run/request not found, inaccessible or mismatched"}},
-            description="Journal permissions apply. Real selected fields of this run's snapshot; no GraphQL document or bodies stored/reconstructed.")
+            description="Journal permissions apply. Real selected fields of this run's snapshot. "
+                        "Raw GraphQL bodies and variables are never stored. A safe normalized document "
+                        "may be stored as safeGraphqlDocument; original secrets and argument values are never exposed.")
 async def get_request(
     run_id: uuid.UUID, request_id: uuid.UUID, session: AsyncSession = Session,
     principal: Principal = Depends(require_analyst),
