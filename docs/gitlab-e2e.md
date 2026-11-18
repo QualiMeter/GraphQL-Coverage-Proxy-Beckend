@@ -74,7 +74,7 @@ UUID в примере иллюстративны: использовать ре
 | `GITLAB_ENABLED` | `false` по умолчанию; `true` включает API запуска и монитор в lifespan |
 | `GITLAB_HOST` | Доверенный HTTPS origin, по умолчанию `https://gitlab.com`; без пути, query, credentials |
 | `GITLAB_TOKEN` | Серверный project/personal access token с `api` scope и ролью, позволяющей запуск выбранных веток и чтение пайплайнов/variables |
-| `GITLAB_SERVICE_PROJECTS` | JSON-привязка `{"<существующий service UUID>":12345}`; числовые project IDs |
+| `GITLAB_SERVICE_PROJECTS` | JSON-привязка `{"<service UUID>":12345}` или `{"<service UUID>":{"projectId":12345,"environment":"qa/staging"}}` |
 | `GITLAB_COVERAGE_URL` | Доступный runner базовый URL Coverage, для текущего стенда `https://graphql.rebyte.fun`; QA добавляет `/graphql`; без ключей и query |
 | `COVERAGE_MIN_PERCENT` | Порог 0–100, по умолчанию 80 |
 | `GITLAB_POLL_SECONDS` | Интервал 2–300 секунд, по умолчанию 10; ошибки увеличивают паузу до 300 секунд |

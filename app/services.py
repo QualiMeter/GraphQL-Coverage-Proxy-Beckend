@@ -20,7 +20,7 @@ from app.contracts import FieldReference, RequestObservationInput
 from app.auth_models import ServiceGrant
 from app.models import (
     GitLabPipeline, GraphQLService, ObservedRequest, QueryPath, QueryPathField,
-    RequestFieldEvidence, RequestPathUsage, RequestFieldUsage, SchemaField,
+    RequestArgumentUsage, RequestFieldEvidence, RequestPathUsage, RequestFieldUsage, SchemaField,
     SchemaSnapshot, SchemaType, TestRun,
 )
 from app.schema_metadata import schema_metadata, root_types, argument_metadata, abstract_metadata
@@ -383,7 +383,7 @@ async def finish_run(
     pipeline_managed: bool = False, status: str = "completed", commit: bool = True,
 ) -> RunOut:
     # Row locking also prevents a concurrent request from recording after completion.
-    run = await session.scalar(select(TestRun).where(TestRun.id == run_id).with_for_update())
+    run = await session.scalar(select(TestRun).where(TestRun.id == run_id).with_for_update().execution_options(populate_existing=True))
     if run is None:
         raise NotFoundError("Test run not found")
     if run.status != "running":
@@ -392,6 +392,8 @@ async def finish_run(
         raise ConflictError("This run is managed by GitLab and cannot be finished manually")
     if status not in {"completed", "failed"}:
         raise ValueError("Invalid final run status")
+    if run.in_flight_requests:
+        raise ConflictError("Wait for admitted GraphQL requests before finishing the run")
     run.status = status
     run.finished_at = datetime.now(timezone.utc)
     if commit:
@@ -445,6 +447,8 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
     field_ids: dict[tuple[str, str], uuid.UUID] = {}
     coordinates = set(analysis.fields)
     coordinates.update(coordinate for path in analysis.paths for coordinate in path)
+    if analysis.arguments is not None:
+        coordinates.update(item.field for item in analysis.arguments)
     if coordinates:
         rows = (await session.execute(
             select(SchemaType.name, SchemaField.name, SchemaField.id)
@@ -456,6 +460,11 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
                    if (item.type_name, item.field_name) not in field_ids}
         if missing:
             raise InvalidReferenceError(f"Fields are absent from the run schema: {sorted(missing)}")
+
+    if analysis.arguments is not None:
+        from app.argument_usage import validate_argument_usage
+        snapshot = await session.get(SchemaSnapshot, run.snapshot_id)
+        await schema_work(validate_argument_usage, snapshot.schema_sdl, analysis.arguments)
 
     canonical_paths: dict[str, tuple[FieldReference, ...]] = {}
     for path in analysis.paths:
@@ -479,6 +488,7 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
             raise InvalidReferenceError("Invalid field evidence")
 
     row = ObservedRequest(
+        argument_usage_version=1 if analysis.arguments is not None else None,
         test_execution_id=observation.test_execution_id,
         field_evidence_version=1 if evidence is not None else None,
         run_id=observation.run_id,
@@ -503,6 +513,10 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
     await session.flush()
     for key in {(item.type_name, item.field_name) for item in analysis.fields}:
         session.add(RequestFieldUsage(request_id=row.id, field_id=field_ids[key]))
+    if analysis.arguments:
+        session.add_all(RequestArgumentUsage(request_id=row.id,
+            field_id=field_ids[(item.field.type_name, item.field.field_name)],
+            argument_name=item.argument_name, state=item.state) for item in analysis.arguments)
     if canonical_paths:
         # Keep bind counts bounded below asyncpg's limit, and acquire unique
         # index entries in a stable order across concurrent runs of a snapshot.

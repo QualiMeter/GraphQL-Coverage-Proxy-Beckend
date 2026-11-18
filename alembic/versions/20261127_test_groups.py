@@ -1,8 +1,8 @@
 from alembic import op
 import sqlalchemy as sa
 
-revision = "20261125_test_groups"
-down_revision = "20261124_test_executions"
+revision = "20261127_test_groups"
+down_revision = "20261126_argument_usage"
 branch_labels = None
 depends_on = None
 

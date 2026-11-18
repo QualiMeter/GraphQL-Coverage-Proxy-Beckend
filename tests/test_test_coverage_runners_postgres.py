@@ -267,3 +267,46 @@ async def test_pytest_runner_real_interruption_publishes_interrupted(runner_back
     rows = (await client.get(f'/api/runs/{run_id}/tests')).json()
     assert len(rows) == 1
     assert rows[0]['status'] == 'interrupted' and rows[0]['failureCode'] == 'runner_interrupted'
+
+
+async def test_playwright_recovers_lost_registration_and_finish_responses_after_commit(runner_backend):
+    client, run_id, base, key = runner_backend
+    source = '''
+const Reporter = require(process.env.COVERAGE_SDK);
+const {createCoverageTest} = Reporter;
+const realFetch = global.fetch;
+let registrationLosses = 3, finishLosses = 2;
+const ids = new Set();
+global.fetch = async (url, options) => {
+  const response = await realFetch(url, options);
+  if (url.endsWith('/tests')) {
+    ids.add(JSON.parse(options.body).id);
+    if (registrationLosses-- > 0) throw new Error('lost after server commit');
+  } else if (url.endsWith('/finish') && finishLosses-- > 0) {
+    // The HTTP headers arrived, but reading the committed response body failed.
+    return {ok: true, status: 200, json: async () => { throw new Error('lost body after commit'); }};
+  }
+  return response;
+};
+(async () => {
+  const info = {testId: 'lost-registration', titlePath: ['lost registration'], retry: 0, annotations: []};
+  const fixture = createCoverageTest({extend: f => f}).coverage[0];
+  let failed = false;
+  try { await fixture({}, async () => {}, info); } catch { failed = true; }
+  if (!failed) throw new Error('Expected setup error');
+  const reporter = new Reporter();
+  reporter.onTestEnd({id: info.testId, titlePath: () => info.titlePath, annotations: info.annotations},
+    {retry: 0, status: 'failed', duration: 17, annotations: []});
+  if (await reporter.onEnd()) throw new Error('Recovery failed');
+  if (ids.size !== 1) throw new Error('Execution identity changed');
+})().catch(error => { console.error(error.message); process.exitCode = 1; });
+'''
+    env = {**os.environ, 'COVERAGE_URL': base, 'COVERAGE_API_KEY': key, 'COVERAGE_TEST_RUN_ID': run_id,
+           'COVERAGE_SDK': str(ROOT / 'integrations/playwright/index.cjs')}
+    result = await asyncio.to_thread(subprocess.run, ['node', '-e', source], env=env,
+                                    capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, (result.stdout + result.stderr).replace(key, '<redacted>')
+    rows = (await client.get(f'/api/runs/{run_id}/tests')).json()
+    assert len(rows) == 1
+    assert rows[0]['status'] == 'failed' and rows[0]['durationMs'] == 17
+    assert not rows[0]['resultMissing']

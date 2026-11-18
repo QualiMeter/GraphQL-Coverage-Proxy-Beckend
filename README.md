@@ -189,8 +189,13 @@ Raw query, GraphQL body, runtime variables, секретные headers и respon
 
 Защищённый запуск пайплайнов, выбор ветки, фоновое отслеживание, настройки
 сервера и примеры для фронтенда: [руководство](docs/gitlab-e2e.md).
+Фильтры истории по ветке, SHA, окружению и job описаны в
+[контракте истории GitLab CI](docs/gitlab-coverage-history.md).
 Для текущего стенда `GITLAB_COVERAGE_URL=https://graphql.rebyte.fun`: QA добавляет
 `/graphql` к базовому URL. В других развёртываниях он может включать префикс
 reverse proxy.
 
 Результаты исправлений независимого аудита Sol и измерения: [отчёт](docs/sol-audit-fixes.md).
+
+Argument Usage API, persistence model and frontend example:
+[docs/argument-usage.md](docs/argument-usage.md).

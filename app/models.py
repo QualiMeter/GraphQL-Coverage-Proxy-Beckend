@@ -91,6 +91,7 @@ class TestRun(Base):
     __table_args__ = (
         Index("ix_test_runs_snapshot_started_id", "snapshot_id", "started_at", "id"),
         CheckConstraint("status IN ('running', 'completed', 'failed')", name="valid_status"),
+        CheckConstraint("in_flight_requests >= 0", name="nonnegative_run_in_flight"),
         Index(
             "uq_test_runs_running_snapshot", "snapshot_id", unique=True,
             postgresql_where=text("status = 'running'"),
@@ -105,6 +106,7 @@ class TestRun(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    in_flight_requests: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
@@ -175,6 +177,7 @@ class ObservedRequest(Base):
             AND octet_length(graphql_error_details::text) <= 16384
             AND graphql_has_errors IS NOT NULL AND graphql_has_errors = (graphql_error_count > 0))
             """, name="valid_graphql_error_details"),
+        CheckConstraint("argument_usage_version IS NULL OR argument_usage_version = 1", name="valid_argument_usage_version"),
         CheckConstraint("field_evidence_version IS NULL OR field_evidence_version = 1", name="valid_field_evidence_version"),
         Index("ix_requests_run_created_id", "run_id", "created_at", "id"),
         Index("ix_requests_run_duration_id", "run_id", "duration_ms", "id"),
@@ -193,6 +196,7 @@ class ObservedRequest(Base):
         CheckConstraint("max_depth IS NULL OR max_depth BETWEEN 0 AND 64", name="valid_analysis_max_depth"),
     )
 
+    argument_usage_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     field_evidence_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     test_execution_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
@@ -243,6 +247,27 @@ class RequestFieldUsage(Base):
         PG_UUID(as_uuid=True), ForeignKey("schema_fields.id", ondelete="RESTRICT"), primary_key=True,
         index=True,
     )
+
+
+class RequestArgumentUsage(Base):
+    """One category per request and canonical schema argument.
+
+    Snapshot and run are obtained through the existing request/field relations.
+    Argument definitions remain in immutable snapshot SDL (no duplicate catalog).
+    """
+    __tablename__ = "request_argument_usage"
+    __table_args__ = (
+        CheckConstraint("state IN ('omitted', 'explicit_null', 'provided', 'unknown', 'mixed')",
+                        name="valid_argument_usage_state"),
+        Index("ix_argument_usage_field_argument_state", "field_id", "argument_name", "state"),
+    )
+
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("observed_requests.id", ondelete="CASCADE"), primary_key=True)
+    field_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("schema_fields.id", ondelete="RESTRICT"), primary_key=True)
+    argument_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
 class QueryPath(Base):
@@ -309,8 +334,11 @@ from app.auth_models import BrowserSession, LoginThrottle, ServiceGrant, User  #
 
 class GitLabPipeline(Base):
     __tablename__ = "gitlab_pipelines"
-    __table_args__ = (UniqueConstraint("gitlab_host", "project_id", "pipeline_id",
-                                      name="uq_gitlab_pipeline_external"),)
+    __table_args__ = (
+        UniqueConstraint("gitlab_host", "project_id", "pipeline_id", name="uq_gitlab_pipeline_external"),
+        Index("ix_gitlab_pipelines_confirmed_ref", "ref", "run_id",
+              postgresql_where=text("pipeline_id IS NOT NULL")),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("test_runs.id", ondelete="RESTRICT"), primary_key=True,
@@ -318,8 +346,10 @@ class GitLabPipeline(Base):
     gitlab_host: Mapped[str] = mapped_column(String(2048), nullable=False)
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     ref: Mapped[str] = mapped_column(String(255), nullable=False)
-    pipeline_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    pipeline_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     pipeline_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(64), index=True)
+    environment: Mapped[str | None] = mapped_column(String(128), index=True)
     pipeline_status: Mapped[str] = mapped_column(String(64), nullable=False, default="creating")
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -331,3 +361,23 @@ class GitLabPipeline(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reconcile_page: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     check_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    jobs_next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    jobs_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    jobs_page: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    jobs_lease_token: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+
+
+class GitLabJob(Base):
+    __tablename__ = "gitlab_jobs"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("gitlab_pipelines.run_id", ondelete="CASCADE"), primary_key=True,
+    )
+    job_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

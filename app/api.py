@@ -22,6 +22,7 @@ from app.run_analytics import get_run_stats, list_operations
 from app.evidence_analytics import EvidenceFilters, FieldEvidencePage, get_field_evidence
 from app.run_comparison import RunComparisonError, compare_run_series, load_run_comparison
 from app.path_analytics import get_run_paths
+from app.argument_usage import RunArgumentsOut, get_run_arguments
 from app.schema_collector import SchemaCollectionError
 from app.schema_work import schema_work
 from app.models import TestRun
@@ -270,19 +271,32 @@ async def post_run(payload: RunCreate, session: AsyncSession = Session,
 
 
 @router.get("/runs", response_model=list[RunOut], responses=TOTAL_RESPONSE,
-            description="Exactly one snapshotId or serviceId. UTC [from,to), startedAt DESC/id DESC. "
-                        "Status accepts running, completed or failed. "
+            description="Exactly one snapshotId or serviceId. UTC [from,to), defaults to startedAt DESC/id DESC. "
+                        "CI metadata and filters require a service grant or admin access. CI values sort NULLs last. "
+                        "Status is the coverage run status; pipelineStatus and jobStatus are separate filters. "
                         "Omitted limit returns all matches for legacy compatibility. Metadata only for admin/CLI.")
 async def get_runs(
     response: Response, filters: Annotated[RunFilters, Query()],
     session: AsyncSession = Session, principal: Principal = Depends(current_principal),
 ):
     try:
+        visibility = visibility_kwargs(principal)
+        include_ci = principal.admin or filters.uses_ci
         if filters.snapshot_id is not None:
-            await ensure_visible_snapshot(session, filters.snapshot_id, **visibility_kwargs(principal))
+            ensure_scope, scope_id = ensure_visible_snapshot, filters.snapshot_id
         else:
-            await ensure_visible_service(session, filters.service_id, **visibility_kwargs(principal))
-        rows, total = await list_run_page(session, filters, include_metadata=principal.admin)
+            ensure_scope, scope_id = ensure_visible_service, filters.service_id
+        await ensure_scope(session, scope_id, require_grant=filters.uses_ci, **visibility)
+        if not include_ci and principal.user_id is not None:
+            try:
+                await ensure_scope(session, scope_id, require_grant=True, **visibility)
+            except NotFoundError:
+                pass
+            else:
+                include_ci = True
+        rows, total = await list_run_page(
+            session, filters, include_metadata=principal.admin, include_ci=include_ci,
+        )
         response.headers["X-Total-Count"] = str(total)
         return rows
     except NotFoundError as exc:
@@ -465,3 +479,30 @@ async def field_evidence(
         return await get_field_evidence(session, run_id, filters)
     except NotFoundError as exc:
         raise api_errors(exc) from exc
+
+
+@router.get(
+    "/runs/{run_id}/arguments", response_model=RunArgumentsOut,
+    responses={404: {"description": "Run not found or inaccessible"}},
+    description="Argument categories per HTTP request, independently of resolver/test outcomes. "
+                "Analyst/operator with service grant, admin or trusted CLI. Filters combine with AND. "
+                "Counts are mutually exclusive: differing known aliases are mixed; uncertainty dominates as unknown. "
+                "Unselected fields do not add omitted hits. unavailable/partial includes historical or failed collection; "
+                "zero counts must not be interpreted as known non-use when availability is unavailable. "
+                "No argument values, variable payloads or schema default values are returned.",
+)
+async def get_arguments(
+    run_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    type_name: str | None = Query(default=None, alias="typeName", min_length=1, max_length=255),
+    field_name: str | None = Query(default=None, alias="fieldName", min_length=1, max_length=255),
+    argument_name: str | None = Query(default=None, alias="argumentName", min_length=1, max_length=255),
+    session: AsyncSession = Session, principal: Principal = Depends(require_analyst),
+):
+    try:
+        await ensure_visible_run(session, run_id, require_grant=True, **visibility_kwargs(principal))
+        return await get_run_arguments(session, run_id, limit=limit, offset=offset,
+            type_name=type_name, field_name=field_name, argument_name=argument_name)
+    except NotFoundError as exc:
+        raise api_errors(exc) from None

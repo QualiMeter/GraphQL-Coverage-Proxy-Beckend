@@ -24,7 +24,7 @@ class ExecutionCreate(ApiModel):
     test_id: str = Field(min_length=1, max_length=2048)
     name: str = Field(min_length=1, max_length=512)
     framework: Literal["pytest", "playwright"]
-    attempt: int = Field(default=1, ge=1, le=10000, strict=True)
+    attempt: int | None = Field(default=1, ge=1, le=10000, strict=True)
     team_key: str | None = Field(default=None, min_length=1, max_length=128)
     suite_key: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -149,15 +149,26 @@ async def create_execution(session, run_id, payload):
         if existing.run_id != run_id:
             raise NotFoundError("Test execution not found")
         if any(getattr(existing, name) != getattr(payload, name)
-               for name in ("test_id", "name", "framework", "attempt", "team_key", "suite_key")):
+               for name in ("test_id", "name", "framework", "attempt", "team_key", "suite_key")
+               if name != "attempt" or payload.attempt is not None):
             raise ConflictError("Execution ID already has different metadata")
         await session.commit()
         return await execution_detail(session, run_id, existing.id)
     if run.status != "running":
         raise ConflictError("Cannot start a test in a finished run")
+    test_key = hashlib.sha256(payload.test_id.encode("utf-8")).hexdigest()
+    attempt = payload.attempt
+    if attempt is None:
+        # The run row lock serializes allocation with every other registration.
+        latest = await session.scalar(select(func.max(TestExecution.attempt)).where(
+            TestExecution.run_id == run_id, TestExecution.framework == payload.framework,
+            TestExecution.test_key == test_key))
+        attempt = (latest or 0) + 1
+        if attempt > 10000:
+            raise ConflictError("Test attempt limit reached")
     row = TestExecution(id=payload.id, run_id=run_id, test_id=payload.test_id,
-                        test_key=hashlib.sha256(payload.test_id.encode("utf-8")).hexdigest(),
-                        name=payload.name, framework=payload.framework, attempt=payload.attempt,
+                        test_key=test_key,
+                        name=payload.name, framework=payload.framework, attempt=attempt,
                         team_key=payload.team_key, suite_key=payload.suite_key)
     session.add(row)
     try:
@@ -192,23 +203,31 @@ class ExecutionBusy(ConflictError):
     pass
 
 
-async def admit_request(session, run_id, execution_id):
+async def admit_request(session, run_id, execution_id=None):
     run = await get_run(session, run_id, lock=True)
     if run.status != "running":
         raise ConflictError("Coverage run is not running")
-    execution = await get_execution(session, run_id, execution_id, lock=True)
-    if execution.status != "running":
-        raise ConflictError("Test execution has already finished")
-    execution.in_flight_requests += 1
+    if execution_id is not None:
+        execution = await get_execution(session, run_id, execution_id, lock=True)
+        if execution.status != "running":
+            raise ConflictError("Test execution has already finished")
+        execution.in_flight_requests += 1
+    run.in_flight_requests += 1
     await session.commit()
     await session.close()
 
 
-async def release_request(sessions, execution_id):
+async def release_request(sessions, execution_id=None, *, run_id=None):
     async with sessions() as session:
-        await session.execute(update(TestExecution).where(
-            TestExecution.id == execution_id, TestExecution.in_flight_requests > 0,
-        ).values(in_flight_requests=TestExecution.in_flight_requests - 1))
+        # Lock order matches admission and recording: run, then execution.
+        if run_id is not None:
+            await session.execute(update(TestRun).where(
+                TestRun.id == run_id, TestRun.in_flight_requests > 0,
+            ).values(in_flight_requests=TestRun.in_flight_requests - 1))
+        if execution_id is not None:
+            await session.execute(update(TestExecution).where(
+                TestExecution.id == execution_id, TestExecution.in_flight_requests > 0,
+            ).values(in_flight_requests=TestExecution.in_flight_requests - 1))
         await session.commit()
 
 
@@ -333,4 +352,4 @@ async def coverage_summary(session, run_id):
         .select_from(ObservedRequest).where(ObservedRequest.run_id == run_id))).one()
     return TestCoverageSummary(run_id=run_id, collection_status=run.status, total_executions=sum(counts.values()),
         total_tests=total_tests, status_counts=counts, missing_results=counts["running"] if run.status != "running" else 0,
-        in_flight_requests=in_flight, total_requests=total, attributed_requests=attributed, unattributed_requests=total-attributed)
+        in_flight_requests=run.in_flight_requests, total_requests=total, attributed_requests=attributed, unattributed_requests=total-attributed)
