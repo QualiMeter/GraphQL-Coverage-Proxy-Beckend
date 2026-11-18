@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ExportMetadata": {
+      "properties": {
+        "generatedAt": {
+          "format": "date-time",
+          "title": "Generatedat",
+          "type": "string"
+        },
+        "service": {
+          "$ref": "#/$defs/ExportService"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/ExportSnapshot"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/ExportRun"
+          },
+          "title": "Runs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "generatedAt",
+        "service",
+        "snapshot",
+        "runs"
+      ],
+      "title": "ExportMetadata",
+      "type": "object"
+    },
+    "ExportRun": {
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "completed",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "startedAt": {
+          "format": "date-time",
+          "title": "Startedat",
+          "type": "string"
+        },
+        "finishedAt": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Finishedat"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status",
+        "startedAt",
+        "finishedAt"
+      ],
+      "title": "ExportRun",
+      "type": "object"
+    },
+    "ExportService": {
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "key",
+        "name"
+      ],
+      "title": "ExportService",
+      "type": "object"
+    },
+    "ExportSnapshot": {
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "schemaHash": {
+          "title": "Schemahash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "schemaHash"
+      ],
+      "title": "ExportSnapshot",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "formatVersion": {
+      "const": 1,
+      "title": "Formatversion",
+      "type": "integer"
+    },
+    "dataset": {
+      "enum": [
+        "coverage",
+        "operations",
+        "requests",
+        "tests",
+        "test-matrix",
+        "comparison"
+      ],
+      "title": "Dataset",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ExportMetadata"
+    },
+    "filters": {
+      "additionalProperties": true,
+      "title": "Filters",
+      "type": "object"
+    },
+    "summary": {
+      "additionalProperties": true,
+      "title": "Summary",
+      "type": "object"
+    },
+    "rowCount": {
+      "maximum": 100000,
+      "minimum": 0,
+      "title": "Rowcount",
+      "type": "integer"
+    },
+    "rows": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Rows",
+      "type": "array"
+    }
+  },
+  "required": [
+    "formatVersion",
+    "dataset",
+    "metadata",
+    "filters",
+    "summary",
+    "rowCount",
+    "rows"
+  ],
+  "title": "ExportDocument",
+  "type": "object"
+}

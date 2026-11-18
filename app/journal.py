@@ -190,11 +190,8 @@ def request_out(row: ObservedRequest) -> RequestOut:
     )
 
 
-async def list_request_page(session: AsyncSession, run_id: uuid.UUID, filters: RequestFilters):
-    run = await session.get(TestRun, run_id)
-    if run is None:
-        raise NotFoundError("Test run not found")
-    conditions = [ObservedRequest.run_id == run_id]
+def request_query(run: TestRun, filters: RequestFilters):
+    conditions = [ObservedRequest.run_id == run.id]
     for name in ("test_execution_id", "operation_key", "operation_name", "operation_type", "analysis_status", "graphql_has_errors", "http_status"):
         value = getattr(filters, name)
         if value is not None:
@@ -213,16 +210,23 @@ async def list_request_page(session: AsyncSession, run_id: uuid.UUID, filters: R
         conditions.append(exists(select(1).select_from(RequestFieldUsage)
             .join(SchemaField, SchemaField.id == RequestFieldUsage.field_id)
             .join(SchemaType, SchemaType.id == SchemaField.type_id).where(*field_conditions)))
-    total = await session.scalar(select(func.count()).select_from(ObservedRequest).where(*conditions))
     column = ObservedRequest.created_at if filters.sort_by == "createdAt" else ObservedRequest.duration_ms
     order = column.asc() if filters.sort_order == "asc" else column.desc()
     tie = ObservedRequest.id.asc() if filters.sort_order == "asc" else ObservedRequest.id.desc()
-    rows = (await session.scalars(select(ObservedRequest).options(
+    return select(ObservedRequest).where(*conditions).order_by(order.nulls_last(), tie)
+
+
+async def list_request_page(session: AsyncSession, run_id: uuid.UUID, filters: RequestFilters):
+    run = await session.get(TestRun, run_id)
+    if run is None:
+        raise NotFoundError("Test run not found")
+    statement = request_query(run, filters)
+    total = await session.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
+    rows = (await session.scalars(statement.options(
         defer(ObservedRequest.safe_graphql_document), defer(ObservedRequest.document_availability),
         defer(ObservedRequest.graphql_error_details), defer(ObservedRequest.graphql_error_count),
         defer(ObservedRequest.graphql_error_details_availability),
-    ).where(*conditions)
-        .order_by(order.nulls_last(), tie).limit(filters.limit).offset(filters.offset))).all()
+    ).limit(filters.limit).offset(filters.offset))).all()
     return [request_out(row) for row in rows], total
 
 

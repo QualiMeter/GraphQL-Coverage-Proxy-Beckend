@@ -276,8 +276,7 @@ async def execution_detail(session, run_id, execution_id):
     return (await execution_stats(session, run, [row]))[0]
 
 
-async def execution_page(session, run_id, filters):
-    run = await get_run(session, run_id)
+def execution_query(run_id, snapshot_id, filters):
     conditions = [TestExecution.run_id == run_id, *group_conditions(filters)]
     for name in ("status", "framework"):
         if getattr(filters, name) is not None:
@@ -290,7 +289,7 @@ async def execution_page(session, run_id, filters):
             RequestFieldUsage, RequestFieldUsage.request_id == ObservedRequest.id).join(
             SchemaField, SchemaField.id == RequestFieldUsage.field_id).join(SchemaType, SchemaType.id == SchemaField.type_id)
         predicates = [ObservedRequest.test_execution_id == TestExecution.id, ObservedRequest.run_id == run_id,
-                      SchemaType.snapshot_id == run.snapshot_id, SchemaType.name == filters.type_name]
+                      SchemaType.snapshot_id == snapshot_id, SchemaType.name == filters.type_name]
         if filters.field_name is not None:
             predicates.append(SchemaField.name == filters.field_name)
         if filters.field_mode == "covered":
@@ -300,16 +299,18 @@ async def execution_page(session, run_id, filters):
                                                                RequestFieldEvidence.field_id == SchemaField.id))
             predicates.append(RequestFieldEvidence.state == "observed")
         conditions.append(exists(selected.where(*predicates)))
-    total = await session.scalar(select(func.count()).select_from(TestExecution).where(*conditions))
-    rows = (await session.scalars(select(TestExecution).where(*conditions).order_by(
-        TestExecution.started_at, TestExecution.id).limit(filters.limit).offset(filters.offset))).all()
+    return select(TestExecution).where(*conditions).order_by(TestExecution.started_at, TestExecution.id)
+
+
+async def execution_page(session, run_id, filters):
+    run = await get_run(session, run_id)
+    statement = execution_query(run_id, run.snapshot_id, filters)
+    total = await session.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
+    rows = (await session.scalars(statement.limit(filters.limit).offset(filters.offset))).all()
     return await execution_stats(session, run, rows), total
 
 
-async def execution_fields(session, run_id, execution_id, limit=100, offset=0, *, groups=None):
-    run = await get_run(session, run_id)
-    if execution_id is not None:
-        await get_execution(session, run_id, execution_id)
+def execution_fields_query(run_id, snapshot_id, execution_id=None, *, groups=None, per_execution=False):
     statement = select(SchemaType.name.label("type_name"), SchemaField.name.label("field_name"),
         SchemaType.kind.label("kind"), func.count().label("selected_request_count"),
         func.sum(case((and_(counted_observation(), SchemaType.kind.in_(COVERAGE_KINDS)), 1), else_=0)).label("hits"),
@@ -321,13 +322,25 @@ async def execution_fields(session, run_id, execution_id, limit=100, offset=0, *
     statement = statement.join(SchemaField, SchemaField.id == RequestFieldUsage.field_id).join(
         SchemaType, SchemaType.id == SchemaField.type_id).outerjoin(RequestFieldEvidence, and_(
             RequestFieldEvidence.request_id == ObservedRequest.id, RequestFieldEvidence.field_id == SchemaField.id))
-    statement = statement.where(ObservedRequest.run_id == run_id, SchemaType.snapshot_id == run.snapshot_id)
+    statement = statement.where(ObservedRequest.run_id == run_id, SchemaType.snapshot_id == snapshot_id)
     if execution_id is not None:
         statement = statement.where(ObservedRequest.test_execution_id == execution_id)
     if groups is not None:
         statement = statement.outerjoin(TestExecution, TestExecution.id == ObservedRequest.test_execution_id)
         statement = statement.where(*group_conditions(groups))
+    if per_execution:
+        statement = statement.add_columns(ObservedRequest.test_execution_id.label("execution_id"))
+        statement = statement.where(ObservedRequest.test_execution_id.is_not(None))
+        statement = statement.group_by(ObservedRequest.test_execution_id)
     statement = statement.group_by(SchemaType.id, SchemaType.name, SchemaType.kind, SchemaField.id, SchemaField.name)
+    return statement
+
+
+async def execution_fields(session, run_id, execution_id, limit=100, offset=0, *, groups=None):
+    run = await get_run(session, run_id)
+    if execution_id is not None:
+        await get_execution(session, run_id, execution_id)
+    statement = execution_fields_query(run_id, run.snapshot_id, execution_id, groups=groups)
     fields = statement.cte("execution_fields")
     total = select(func.count().label("total")).select_from(fields).subquery()
     page = select(fields).order_by(fields.c.type_name, fields.c.field_name).limit(limit).offset(offset).subquery()

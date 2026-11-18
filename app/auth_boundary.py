@@ -24,7 +24,8 @@ class AuthBoundaryMiddleware:
         is_schema_write = path.startswith("/api/schemas/") and scope["method"] == "PATCH"
         is_gitlab = path == "/api/runs/gitlab" and scope["method"] == "POST"
         is_test_write = path.startswith("/api/runs/") and "/tests" in path and scope["method"] == "POST"
-        if is_auth or is_service_write or is_introspection or is_sdl or is_schema_write or is_gitlab or is_test_write:
+        is_export = path == "/api/runs/compare/export" and scope["method"] == "POST"
+        if is_auth or is_service_write or is_introspection or is_sdl or is_schema_write or is_gitlab or is_test_write or is_export:
             body_limit = 1_048_576 if is_sdl else 16_384
             body = bytearray()
             while True:
@@ -33,7 +34,7 @@ class AuthBoundaryMiddleware:
                     return
                 body.extend(message.get("body", b""))
                 if len(body) > body_limit:
-                    response = JSONResponse({"detail": "Test metadata payload too large" if is_test_write else "Authentication payload too large" if is_auth else "Schema import payload too large" if is_introspection or is_sdl else "Schema payload too large" if is_schema_write else "Service payload too large"}, status_code=413,
+                    response = JSONResponse({"detail": "Export payload too large" if is_export else "Test metadata payload too large" if is_test_write else "Authentication payload too large" if is_auth else "Schema import payload too large" if is_introspection or is_sdl else "Schema payload too large" if is_schema_write else "Service payload too large"}, status_code=413,
                                             headers={"Cache-Control": "no-store"})
                     return await response(scope, receive, send)
                 if not message.get("more_body", False):
