@@ -254,15 +254,29 @@ async def graphql_proxy(request: Request, session: AsyncSession | None = Depends
         return await forward_exchange(session, run_id, analyzer, target, destination, body, headers, allow_cookies, execution_id)
     finally:
         if execution_id is not None:
-            cleanup = asyncio.create_task(release_request(sessions, execution_id))
+            # Close/rollback capture before a separate session updates the same
+            # execution row. Run both steps under one shield so cancellation
+            # cannot leave a transaction holding the cleanup's row lock.
+            async def close_and_release():
+                await session.close()
+                await release_request(sessions, execution_id)
+
+            cleanup = asyncio.create_task(close_and_release())
+            cancelled = False
             try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                await cleanup
-                raise
+                while True:
+                    try:
+                        await asyncio.shield(cleanup)
+                        break
+                    except asyncio.CancelledError:
+                        if cleanup.cancelled():
+                            raise
+                        cancelled = True
             except Exception as exc:
                 internal_failure("test_execution_release", exc, run_id=run_id)
                 raise HTTPException(502, "Test coverage state could not be saved; upstream may have executed the request. Do not retry automatically.") from None
+            if cancelled:
+                raise asyncio.CancelledError
 
 
 async def forward_exchange(session, run_id, analyzer, target, destination, body, headers, allow_cookies, execution_id):

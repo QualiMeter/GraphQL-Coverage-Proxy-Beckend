@@ -125,7 +125,7 @@ async function health(request, coverage) {
   const execution = await coverage.trackRun(process.env.COVERAGE_TEST_RUN_ID);
   const response = await request.post(process.env.COVERAGE_URL + '/graphql', {
     headers: {...execution.headers, 'X-Coverage-Api-Key': process.env.COVERAGE_API_KEY},
-    data: {query: '{ health }'},
+    data: {query: '{ health }'}, maxRedirects: 0,
   });
   expect(response.status()).toBe(200);
   return (await response.json()).data.health;
@@ -184,3 +184,77 @@ async def test_external_runner_persists_real_results_and_fields(runner_backend, 
         retried = [row for row in rows if "retry succeeds" in row["name"]]
         assert {(row["attempt"], row["status"]) for row in retried} == {(1, "failed"), (2, "passed")}
         assert len({row["testId"] for row in retried}) == 1
+
+
+async def test_playwright_helper_does_not_send_key_to_upstream_redirect_target(runner_backend, tmp_path, monkeypatch):
+    client, run_id, base, key = runner_backend
+    received = []
+
+    class Foreign(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            received.append(dict(self.headers))
+            self.send_response(200)
+            self.end_headers()
+
+        do_GET = do_POST
+
+    foreign = ThreadingHTTPServer(('127.0.0.1', 0), Foreign)
+    thread = threading.Thread(target=foreign.serve_forever, daemon=True)
+    thread.start()
+
+    def redirect(self):
+        self.rfile.read(int(self.headers['Content-Length']))
+        self.send_response(307)
+        self.send_header('Location', f'http://127.0.0.1:{foreign.server_port}/foreign')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    monkeypatch.setattr(Upstream, 'do_POST', redirect)
+    source = '''
+const {request} = require(process.env.PLAYWRIGHT_PACKAGE);
+const {createCoverageTest} = require(process.env.COVERAGE_SDK);
+(async () => {
+  const fixtures = createCoverageTest({extend: x => x});
+  const context = await request.newContext();
+  try {
+    await fixtures.coverage[0]({}, async coverage => {
+      const execution = await coverage.trackRun(process.env.COVERAGE_TEST_RUN_ID);
+      const response = await execution.post(context, {query: '{ health }'});
+      if (response.status() !== 307) throw new Error('Expected un-followed upstream redirect');
+    }, {testId: 'redirect-test', titlePath: ['redirect'], retry: 0, annotations: []});
+  } finally { await context.dispose(); }
+})().catch(error => { console.error(error.message); process.exitCode = 1; });
+'''
+    env = {**os.environ, 'COVERAGE_URL': base, 'COVERAGE_API_KEY': key, 'COVERAGE_TEST_RUN_ID': run_id,
+           'COVERAGE_SDK': str(ROOT / 'integrations/playwright/index.cjs'),
+           'PLAYWRIGHT_PACKAGE': str(ROOT / 'integrations/playwright/node_modules/@playwright/test')}
+    try:
+        result = await asyncio.to_thread(subprocess.run, ['node', '-e', source], env=env,
+                                         capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (result.stdout + result.stderr).replace(key, '<redacted>')
+        assert received == []
+        rows = (await client.get(f'/api/runs/{run_id}/requests')).json()
+        assert len(rows) == 1 and rows[0]['httpStatus'] == 307
+    finally:
+        await asyncio.to_thread(foreign.shutdown)
+        foreign.server_close()
+        thread.join(timeout=5)
+
+
+async def test_pytest_runner_real_interruption_publishes_interrupted(runner_backend, tmp_path):
+    client, run_id, base, key = runner_backend
+    (tmp_path / 'pytest.ini').write_text('[pytest]\n')
+    (tmp_path / 'test_interrupt.py').write_text('def test_interrupted(coverage_test):\n    raise KeyboardInterrupt()\n')
+    env = {**os.environ, 'COVERAGE_TEST_RUN_ID': run_id, 'COVERAGE_URL': base, 'COVERAGE_API_KEY': key,
+           'PYTHONPATH': str(ROOT / 'integrations/python/src'), 'PYTHONDONTWRITEBYTECODE': '1'}
+    env.pop('PYTEST_ADDOPTS', None)
+    result = await asyncio.to_thread(subprocess.run,
+        [sys.executable, '-m', 'pytest', '-q', '-c', 'pytest.ini', '-p', 'coverage_test.pytest_plugin', 'test_interrupt.py'],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2
+    rows = (await client.get(f'/api/runs/{run_id}/tests')).json()
+    assert len(rows) == 1
+    assert rows[0]['status'] == 'interrupted' and rows[0]['failureCode'] == 'runner_interrupted'

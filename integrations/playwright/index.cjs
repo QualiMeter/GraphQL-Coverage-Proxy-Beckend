@@ -112,19 +112,36 @@ function createCoverageTest(baseTest, options = {}) {
       const executions = new Map();
       const coverage = {
         async trackRun(runId) {
-          if (executions.has(runId)) return executions.get(runId);
-          const config = settings(options);
-          const id = randomUUID();
-          const testId = (info.testId || info.titlePath.join('::')) + (info.repeatEachIndex ? `:repeat=${info.repeatEachIndex}` : '');
-          const name = Array.from(info.titlePath.join(' › ').trim()).slice(0, 512).join('');
-          const attempt = info.retry + 1;
-          confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(runId)}/tests`, {
-            id, testId, name, framework: 'playwright', attempt,
-          }), id, runId);
-          const execution = {id, runId, headers: {'X-Coverage-Run-Id': runId, 'X-Coverage-Test-Execution-Id': id}};
-          executions.set(runId, execution);
-          info.annotations.push({type: 'coverage.execution', description: JSON.stringify({id, runId, attempt})});
-          return execution;
+          let entry = executions.get(runId);
+          if (!entry) {
+            entry = {id: randomUUID(), pending: null};
+            executions.set(runId, entry);
+          }
+          if (!entry.pending) {
+            // Install the promise before registration yields. Retain the UUID
+            // even after a network failure: POST may already have committed.
+            entry.pending = Promise.resolve().then(async () => {
+              const config = settings(options);
+              const id = entry.id;
+              const testId = (info.testId || info.titlePath.join('::')) + (info.repeatEachIndex ? `:repeat=${info.repeatEachIndex}` : '');
+              const name = Array.from(info.titlePath.join(' › ').trim()).slice(0, 512).join('');
+              const attempt = info.retry + 1;
+              confirm(await metadata(config, 'POST', `/api/runs/${encodeURIComponent(runId)}/tests`, {
+                id, testId, name, framework: 'playwright', attempt,
+              }), id, runId);
+              const headers = {'X-Coverage-Run-Id': runId, 'X-Coverage-Test-Execution-Id': id};
+              const execution = {id, runId, headers,
+                post(request, data) {
+                  return request.post(config.base + '/graphql', {
+                    headers: {...headers, 'X-Coverage-Api-Key': config.key}, data, maxRedirects: 0,
+                  });
+                },
+              };
+              info.annotations.push({type: 'coverage.execution', description: JSON.stringify({id, runId, attempt})});
+              return execution;
+            }).catch(error => { entry.pending = null; throw error; });
+          }
+          return entry.pending;
         },
       };
       const runId = options.runId || process.env.COVERAGE_TEST_RUN_ID;

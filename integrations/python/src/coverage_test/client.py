@@ -23,6 +23,7 @@ class TestExecution:
         self.payload = {"id": self.id, "testId": test_id, "name": " ".join(name.split())[:512], "framework": framework, "attempt": attempt}
         self.started = self.finished = False
         self.snapshot = None
+        self.final_result = None
 
     @property
     def path(self):
@@ -33,9 +34,13 @@ class TestExecution:
         return {"X-Coverage-Run-Id": self.run_id, "X-Coverage-Test-Execution-Id": self.id}
 
     def _request(self, method, path, payload=None):
+        deadline = time.monotonic() + 5 if path.endswith("/finish") else None
         for attempt in range(3):
+            remaining = deadline - time.monotonic() if deadline is not None else 10
+            if remaining <= 0:
+                raise CoverageTrackingError("Coverage metadata request timed out")
             try:
-                with httpx.Client(timeout=10, trust_env=False) as client:
+                with httpx.Client(timeout=min(10, remaining), trust_env=False, follow_redirects=False) as client:
                     response = client.request(method, self.base + path, json=payload,
                                               headers={"X-Coverage-Api-Key": self.key})
             except httpx.HTTPError:
@@ -53,6 +58,10 @@ class TestExecution:
                     data = {}
                 busy = data.get("detail", {}) if isinstance(data, dict) else {}
                 if isinstance(busy, dict) and busy.get("code") == "test_requests_in_flight":
+                    if (path.endswith("/finish") and attempt < 2
+                            and time.monotonic() + .1 * (attempt + 1) < deadline):
+                        time.sleep(.1 * (attempt + 1))
+                        continue
                     raise CoverageTrackingError("Test still has requests in flight")
                 raise CoverageTrackingError(f"Coverage metadata request returned HTTP {response.status_code}")
             try:
@@ -72,6 +81,10 @@ class TestExecution:
         if not self.started:
             self.start()
         payload = {"status": status, "durationMs": duration_ms, "failureCode": failure_code}
+        if self.final_result is None:
+            self.final_result = payload
+        elif payload != self.final_result:
+            raise CoverageTrackingError("Cannot replace the known test result")
         response = self._request("POST", self.path + "/finish", payload).json()
         self._identity(response)
         if response.get("status") != status:

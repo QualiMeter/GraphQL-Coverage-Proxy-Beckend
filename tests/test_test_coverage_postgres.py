@@ -270,3 +270,74 @@ async def test_new_migration_preserves_historical_observations(isolated_database
     async with sessions() as session:
         restored = await session.get(ObservedRequest, ident)
         assert restored.run_id == run.id and restored.test_execution_id is None
+
+
+@pytest.mark.parametrize("failure", ["exception", "database", "cancel"])
+async def test_capture_failure_after_execution_lock_cannot_deadlock_cleanup(context, monkeypatch, failure):
+    from app import services
+    from app.models import TestExecution
+    client, sessions, run_id, _ = context
+    execution, _ = await start(client, run_id)
+    original = services.record_observation
+    locked = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def fail_after_lock(session, observation):
+        # Use the actual PostgreSQL row lock, then fail before commit.
+        await session.scalar(select(TestExecution).where(
+            TestExecution.id == uuid.UUID(execution["id"])).with_for_update())
+        locked.set()
+        if failure == "cancel":
+            await blocked.wait()
+        elif failure == "database":
+            await session.execute(text("SELECT 1 / 0"))
+        else:
+            raise RuntimeError("test-only capture failure")
+        return await original(session, observation)
+
+    monkeypatch.setattr(services, "record_observation", fail_after_lock)
+    # e2e_capture imports record_observation directly.
+    monkeypatch.setattr("app.e2e_capture.record_observation", fail_after_lock)
+    task = asyncio.create_task(exchange(client, run_id, execution["id"]))
+    await asyncio.wait_for(locked.wait(), 3)
+    if failure == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+    else:
+        assert (await asyncio.wait_for(task, 3)).status_code == 502
+    async with sessions() as session:
+        row = await session.get(TestExecution, uuid.UUID(execution["id"]))
+        assert row.in_flight_requests == 0
+        assert not (await session.scalars(select(ObservedRequest).where(
+            ObservedRequest.test_execution_id == row.id))).all()
+    assert sessions.kw["bind"].pool.checkedout() == 0
+    assert (await finish(client, run_id, execution["id"], "failed")).status_code == 200
+
+
+async def test_repeated_cancellation_during_cleanup_still_releases_slot(context, monkeypatch):
+    from app import proxy
+    client, sessions, run_id, _ = context
+    execution, _ = await start(client, run_id)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = proxy.release_request
+
+    async def delayed_release(sessions, execution_id):
+        assert sessions.kw['bind'].pool.checkedout() == 0
+        entered.set()
+        await resume.wait()
+        await original(sessions, execution_id)
+
+    monkeypatch.setattr(proxy, 'release_request', delayed_release)
+    task = asyncio.create_task(exchange(client, run_id, execution['id']))
+    await asyncio.wait_for(entered.wait(), 3)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    resume.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    result = await finish(client, run_id, execution['id'])
+    assert result.status_code == 200
+    assert result.json()['inFlightRequests'] == 0 and result.json()['requestCount'] == 1

@@ -42,7 +42,11 @@ def publish(context, status, failure_code):
     for execution in context.executions.values():
         if execution.finished:
             continue
-        execution.finish(status, duration_ms, failure_code)
+        result = execution.final_result
+        if result is None:
+            execution.finish(status, duration_ms, failure_code)
+        else:
+            execution.finish(result["status"], result["durationMs"], result["failureCode"])
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)

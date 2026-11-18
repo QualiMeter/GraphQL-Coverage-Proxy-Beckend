@@ -90,11 +90,17 @@ test('Health', async ({request, coverage}) => {
   const response = await request.post(process.env.COVERAGE_URL + '/graphql', {
     headers: {...execution.headers, 'X-Coverage-Api-Key': process.env.COVERAGE_API_KEY},
     data: {query: '{ health }'},
+    maxRedirects: 0,
   });
   expect(response.status()).toBe(200);
   expect((await response.json()).data.health).toBe('ok');
 });
 ```
+
+Для безопасной отправки можно использовать `execution.post(request, {query: '{ health }'})`:
+helper добавляет ключ и идентификаторы и всегда задаёт `maxRedirects: 0`.
+При ручном вызове `request.post` этот параметр обязателен: Playwright иначе
+может повторно отправить пользовательские заголовки на адрес из `Location`.
 
 В `playwright.config.cjs` добавьте reporter:
 
@@ -126,3 +132,9 @@ python -m pytest tests/test_test_coverage_runners_postgres.py -q
 assertion и teardown проверяют сохранение failed; родительские тесты должны
 пройти. Используется только HTTP-fixture с одним GraphQL-полем, браузер
 не требуется. Backend CI устанавливает адаптеры и выполняет эти проверки.
+
+Python SDK повторяет finish при `409/test_requests_in_flight` максимум три раза
+с паузами 100/200 мс и бюджетом retry 5 секунд. UUID и итоговый payload сохраняются.
+Если подтверждение не получено, runner сообщает ошибку сбора; session cleanup
+повторяет известный результат, а `interrupted` использует только для тестов,
+которые не успели получить итоговый результат.
