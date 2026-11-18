@@ -7,3 +7,5 @@ deploy/.env
 .pytest_cache/
 tests/
 docs/
+integrations/
+reports/

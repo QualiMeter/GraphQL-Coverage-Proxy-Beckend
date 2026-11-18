@@ -417,6 +417,14 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
     if run.status != "running":
         raise ConflictError("Cannot record observations for a finished run")
 
+    if observation.test_execution_id is not None:
+        from app.models import TestExecution
+        execution = await session.scalar(select(TestExecution).where(
+            TestExecution.id == observation.test_execution_id, TestExecution.run_id == run.id,
+        ).with_for_update())
+        if execution is None or execution.in_flight_requests < 1:
+            raise InvalidReferenceError("Test execution has no admitted request for this run")
+
     analysis = observation.analysis
     if analysis.status not in {
         "success", "parse_error", "validation_error", "unsupported", "internal_error"
@@ -471,6 +479,7 @@ async def record_observation(session: AsyncSession, observation: RequestObservat
             raise InvalidReferenceError("Invalid field evidence")
 
     row = ObservedRequest(
+        test_execution_id=observation.test_execution_id,
         field_evidence_version=1 if evidence is not None else None,
         run_id=observation.run_id,
         operation_name=analysis.operation_name,

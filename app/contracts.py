@@ -88,3 +88,4 @@ class RequestObservationInput:
     safe_document: SafeDocument = field(default_factory=SafeDocument)
     graphql_errors: ErrorSummary = field(default_factory=ErrorSummary)
     field_evidence: tuple[FieldEvidence, ...] | None = None
+    test_execution_id: uuid.UUID | None = None

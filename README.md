@@ -10,6 +10,11 @@ HTTP-прокси направляет запросы в выбранный се
   неизменяемые снимки схем, названия снимков и выгрузка SDL.
 - Прогоны, история и журнал с фильтрами, покрытие полей, агрегаты операций,
   среднее время, P95 и временная шкала.
+- [Test Coverage](docs/test-coverage.md): привязка обращений к попыткам
+  pytest/Playwright, результаты passed/failed/skipped/interrupted, поля каждого
+  теста и поиск тестов по полю.
+- [Клиентские адаптеры](integrations/README.md) pytest и Playwright для
+  подключения своих тестов без установки QA-панели.
 - Browser-сессии, роли viewer/analyst/operator/admin, grants и CSRF;
   отдельный административный ключ для доверенных CLI/CI.
 - Защищённый request detail: выбранные поля, AST с маскированием литералов
@@ -19,7 +24,7 @@ HTTP-прокси направляет запросы в выбранный се
 Поддерживаются HTTP POST и анализ query/mutation с именованными и inline
 фрагментами, включая интерфейсы, union и директивы `@skip`/`@include`.
 Subscriptions и нестандартные execution directives не дают покрытия; batching, WebSocket и
-потоковая доставка не поддерживаются. Привязки обращения к E2E test case нет.
+потоковая доставка не поддерживаются.
 
 ## Архитектура
 
@@ -110,7 +115,8 @@ Docker NAT. Дополнительные `POSTGRES_*`/`API_PORT` описаны 
 использовать production запрещено.
 
 ```bash
-python -m pip install -e '.[test]'
+python -m pip install -e '.[test]' -e integrations/python
+npm ci --prefix integrations/playwright
 alembic upgrade head
 DATABASE_URL="$TEST_DATABASE_URL" alembic upgrade head
 python -m pytest -m "not integration" -q
@@ -126,6 +132,10 @@ git diff --check
 использует PostgreSQL 16 и дополнительно запускает
 `python tests/docker_auth_smoke.py` — изолированный Nginx TLS → Docker → Uvicorn
 smoke. Для него нужен Linux Docker daemon.
+
+Адаптеры Test Coverage находятся в `integrations/`; для проверки Playwright
+нужен Node.js 22. Браузер для этих HTTP-проверок устанавливать не требуется.
+Полная QA-платформа, панель и магазин находятся в отдельном QA-репозитории.
 
 ## Deployment
 
